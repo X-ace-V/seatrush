@@ -20,12 +20,16 @@ const config: { primary: string; replica?: string }[] = JSON.parse(process.env.S
   { primary: `${local}:5442/seatrush` },
 ]));
 const max = Number(process.env.PG_POOL_SIZE ?? 10);
-// Without an 'error' listener, an idle pooled connection killed by a database
-// restart emits an unhandled error and crashes the whole process. Log it; the
-// pool drops the dead connection and opens a new one on demand.
+// Without 'error' listeners, a connection killed by a database restart emits
+// an unhandled error and crashes the whole process. The pool reports idle
+// connections; a checked-out client (mid-transaction) reports on itself, so
+// every client gets a listener too. The in-flight query just rejects, and the
+// pool replaces the dead connection on demand.
 function newPool(connectionString: string) {
   const pool = new pg.Pool({ connectionString, max });
-  pool.on('error', (err) => console.error('idle db connection lost:', err.message));
+  const log = (err: Error) => console.error('db connection lost:', err.message);
+  pool.on('error', log);
+  pool.on('connect', (client) => client.on('error', log));
   return pool;
 }
 

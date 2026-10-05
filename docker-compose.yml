@@ -1,10 +1,17 @@
-# Shard list used by every process: shard 0 is the original primary + replica
-# (behind PgBouncer) and also holds the catalog; shards 1 and 2 are extra
-# primaries. Containers reach them by service name.
-x-shards: &shards >-
-  [{"primary":"postgres://seatrush:seatrush@pgbouncer:5432/seatrush","replica":"postgres://seatrush:seatrush@pgbouncer-replica:5432/seatrush"},
-   {"primary":"postgres://seatrush:seatrush@shard1:5432/seatrush"},
-   {"primary":"postgres://seatrush:seatrush@shard2:5432/seatrush"}]
+# Two simulated regions. us: shards 0 (+catalog, + a local replica) and 1,
+# Kafka and the payment pipeline. eu: shard 2, a replica of shard 0, its own
+# API, nginx and cache. Every cross-region link goes through toxiproxy, which
+# injects latency (regions/latency.sh). Each region sees the same shards, but
+# reaches the other region's through the proxy.
+x-shards-us: &shards-us >-
+  [{"region":"us","primary":"postgres://seatrush:seatrush@pgbouncer:5432/seatrush","replica":"postgres://seatrush:seatrush@pgbouncer-replica:5432/seatrush"},
+   {"region":"us","primary":"postgres://seatrush:seatrush@shard1:5432/seatrush"},
+   {"region":"eu","primary":"postgres://seatrush:seatrush@toxiproxy:15442/seatrush"}]
+x-shards-eu: &shards-eu >-
+  [{"region":"us","primary":"postgres://seatrush:seatrush@toxiproxy:15432/seatrush","replica":"postgres://seatrush:seatrush@postgres-replica-eu:5432/seatrush"},
+   {"region":"us","primary":"postgres://seatrush:seatrush@toxiproxy:15441/seatrush"},
+   {"region":"eu","primary":"postgres://seatrush:seatrush@shard2:5432/seatrush"}]
+x-region-apis: &region-apis '{"us":"http://toxiproxy:18080","eu":"http://toxiproxy:18081"}'
 
 services:
   postgres:
@@ -44,10 +51,13 @@ services:
 
   # Stateless API. Scale with: docker compose up -d --scale app=N
   # No host port: traffic enters through nginx so replicas don't fight over :3000.
-  app:
+  app: &app
     build: .
-    environment:
-      SHARDS: *shards
+    environment: &app-env
+      REGION: us
+      REGION_APIS: *region-apis
+      FORWARD_WRITES: ${FORWARD_WRITES:-on}
+      SHARDS: *shards-us
       PARTITION_BY: ${PARTITION_BY:-section}
       PG_POOL_SIZE: ${PG_POOL_SIZE:-10}
       READS_FROM: ${READS_FROM:-replica}
@@ -69,6 +79,56 @@ services:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 2s
       retries: 15
+
+  # ---- eu region: its own API replicas, cache and entry point ----
+  app-eu:
+    <<: *app
+    environment:
+      <<: *app-env
+      REGION: eu
+      SHARDS: *shards-eu
+      REDIS_URL: redis://redis-eu:6379
+    depends_on:
+      toxiproxy: { condition: service_started }
+      postgres-replica-eu: { condition: service_healthy }
+      shard2: { condition: service_healthy }
+      redis-eu: { condition: service_started }
+
+  redis-eu:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  # Same nginx config, pointed at app-eu.
+  nginx-eu:
+    image: nginx:1.27-alpine
+    volumes: [./nginx/nginx.conf:/etc/nginx/nginx.conf.in:ro]
+    command: ["sh", "-c", "sed 's/app:3000/app-eu:3000/' /etc/nginx/nginx.conf.in > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"]
+    ports: ["8081:80"]
+    depends_on: [app-eu]
+
+  # Replica of shard 0 living in eu: streams WAL from the us primary across
+  # the proxied link, so cross-region latency shows up as replication lag.
+  postgres-replica-eu:
+    image: postgres:16
+    user: postgres
+    environment:
+      PGPASSWORD: replicator
+    command: >
+      bash -c "[ -s $$PGDATA/PG_VERSION ] || pg_basebackup -h toxiproxy -p 15400 -U replicator -D $$PGDATA -R -X stream
+      && chmod 700 $$PGDATA
+      && exec postgres"
+    healthcheck: *pg-health
+    depends_on:
+      toxiproxy: { condition: service_started }
+      postgres: { condition: service_healthy }
+
+  # Every cross-region link. Latency and partitions are set at runtime
+  # through its API on localhost:8474 (regions/latency.sh).
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    command: ["-host=0.0.0.0", "-config=/regions/toxiproxy.json"]
+    volumes: [./regions:/regions:ro]
+    ports: ["8474:8474"]
 
   # Connection pooler. Apps may open thousands of client connections;
   # pgbouncer multiplexes them onto DEFAULT_POOL_SIZE real Postgres connections.
@@ -136,7 +196,7 @@ services:
     build: .
     command: ["node", "src/outbox-relay.ts"]
     environment:
-      SHARDS: *shards
+      SHARDS: *shards-us
       PARTITION_BY: ${PARTITION_BY:-section}
       KAFKA_BROKERS: kafka:9092
     depends_on:
@@ -149,7 +209,7 @@ services:
     command: ["node", "src/payment-worker.ts"]
     restart: unless-stopped   # it exits on a failed batch so Kafka redelivers it
     environment:
-      SHARDS: *shards
+      SHARDS: *shards-us
       PARTITION_BY: ${PARTITION_BY:-section}
       KAFKA_BROKERS: kafka:9092
     depends_on:

@@ -12,9 +12,13 @@ export const SECTION_SIZE = 1000;
 // (event, section), which spreads one huge event across many partitions.
 const byEvent = process.env.PARTITION_BY === 'event';
 
-type Shard = { primary: pg.Pool; replica?: pg.Pool };
+// The region this process runs in. Each shard lives in one region; an event's
+// home region is the region of the shard that holds its partition.
+export const REGION = process.env.REGION ?? 'us';
+
+type Shard = { region: string; primary: pg.Pool; replica?: pg.Pool };
 const local = 'postgres://seatrush:seatrush@localhost';
-const config: { primary: string; replica?: string }[] = JSON.parse(process.env.SHARDS ?? JSON.stringify([
+const config: { region?: string; primary: string; replica?: string }[] = JSON.parse(process.env.SHARDS ?? JSON.stringify([
   { primary: `${local}:5432/seatrush`, replica: `${local}:5433/seatrush` },
   { primary: `${local}:5441/seatrush` },
   { primary: `${local}:5442/seatrush` },
@@ -33,7 +37,9 @@ function newPool(connectionString: string) {
   return pool;
 }
 
-export const shards: Shard[] = config.map((c) => ({ primary: newPool(c.primary), replica: c.replica ? newPool(c.replica) : undefined }));
+export const shards: Shard[] = config.map((c) => ({
+  region: c.region ?? REGION, primary: newPool(c.primary), replica: c.replica ? newPool(c.replica) : undefined,
+}));
 export const catalog = shards[0].primary;
 
 export const sectionOf = (seatNo: number) => Math.floor((seatNo - 1) / SECTION_SIZE);

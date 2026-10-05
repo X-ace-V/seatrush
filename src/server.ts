@@ -1,5 +1,5 @@
-import Fastify from 'fastify';
-import { shards, route, routeSection, startPartitionMapRefresh, isTransient } from './shards.ts';
+import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
+import { shards, route, routeSection, startPartitionMapRefresh, isTransient, REGION } from './shards.ts';
 import { cached, redis } from './cache.ts';
 import { waitingRoom, waitingRoomOn, hasPass } from './waiting-room.ts';
 import { PAYMENT_REQUESTS } from './kafka.ts';
@@ -75,6 +75,30 @@ app.get<{ Params: { id: string; section: string } }>('/events/:id/sections/:sect
   return reply.type('application/json').send(json);
 });
 
+// Writes for an event homed in another region are forwarded to that region's
+// API as ONE request: one cross-region round trip. The alternative, running
+// our transaction against the remote database, costs a round trip per
+// statement and holds row locks across the ocean. FORWARD_WRITES=off
+// switches to that, for comparison. A forwarded request is never forwarded
+// again, so two regions with briefly different partition maps cannot loop;
+// the fence on the shard still protects the data.
+const regionApis: Record<string, string> = JSON.parse(process.env.REGION_APIS ?? '{}');
+const forwardWrites = process.env.FORWARD_WRITES !== 'off';
+
+async function forwarded(req: FastifyRequest, reply: FastifyReply, eventId: number, seatNo: number) {
+  const home = route(eventId, seatNo).region;
+  if (!forwardWrites || home === REGION || req.headers['x-forwarded-region']) return false;
+  const headers: Record<string, string> = { 'content-type': 'application/json', 'x-forwarded-region': REGION };
+  for (const h of ['idempotency-key', 'x-queue-pass']) if (req.headers[h]) headers[h] = req.headers[h] as string;
+  const res = await fetch(regionApis[home] + req.url, {
+    method: req.method, headers, body: req.method === 'POST' ? JSON.stringify(req.body) : undefined,
+  });
+  reply.code(res.status).header('x-home-region', home).type('application/json');
+  if (res.headers.get('retry-after')) reply.header('retry-after', res.headers.get('retry-after')!);
+  reply.send(await res.text());
+  return true;
+}
+
 const holdSeconds = Number(process.env.HOLD_SECONDS ?? 300);
 const maxDbQueue = Number(process.env.MAX_DB_QUEUE ?? Infinity);
 
@@ -84,6 +108,7 @@ const maxDbQueue = Number(process.env.MAX_DB_QUEUE ?? Infinity);
 // held_until < now()), so no background job is needed to free them.
 app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/holds', async (req, reply) => {
   const { eventId, seatNo, userId } = req.body;
+  if (await forwarded(req, reply, eventId, seatNo)) return reply;
   const { primary } = route(eventId, seatNo);
 
   if (waitingRoomOn && !hasPass(req.headers['x-queue-pass'] as string, userId)) {
@@ -119,6 +144,7 @@ app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/paymen
   const key = req.headers['idempotency-key'] as string | undefined;
   if (!key) return reply.code(400).send({ error: 'Idempotency-Key header required' });
   const { eventId, seatNo, userId } = req.body;
+  if (await forwarded(req, reply, eventId, seatNo)) return reply;
   const { primary, part } = route(eventId, seatNo);
 
   const client = await primary.connect();
@@ -165,6 +191,7 @@ app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/paymen
 
 // Payments live on the seat's shard, so the status lookup needs the seat too.
 app.get<{ Params: { key: string }; Querystring: { eventId: string; seatNo: string } }>('/payments/:key', async (req, reply) => {
+  if (await forwarded(req, reply, Number(req.query.eventId), Number(req.query.seatNo))) return reply;
   const { primary } = route(Number(req.query.eventId), Number(req.query.seatNo));
   const { rows } = await primary.query('SELECT status FROM payments WHERE idempotency_key = $1', [req.params.key]);
   return rows[0] ?? reply.code(404).send({ error: 'unknown payment' });

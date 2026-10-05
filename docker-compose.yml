@@ -17,9 +17,23 @@ services:
   app:
     build: .
     environment:
-      DATABASE_URL: postgres://seatrush:seatrush@postgres:5432/seatrush
+      DATABASE_URL: postgres://seatrush:seatrush@pgbouncer:5432/seatrush
       PG_POOL_SIZE: ${PG_POOL_SIZE:-10}
       LOG_LEVEL: warn
+    depends_on: [pgbouncer]
+
+  # Connection pooler. Apps may open thousands of client connections;
+  # pgbouncer multiplexes them onto DEFAULT_POOL_SIZE real Postgres connections.
+  # Transaction mode returns a server connection to the pool after every
+  # transaction, which is safe because each booking is a single statement.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.0-p0
+    environment:
+      DATABASE_URL: postgres://seatrush:seatrush@postgres:5432/seatrush
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 5000
+      DEFAULT_POOL_SIZE: ${PGB_POOL_SIZE:-40}
     depends_on:
       postgres: { condition: service_healthy }
 

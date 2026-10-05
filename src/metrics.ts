@@ -46,7 +46,15 @@ export function instrument(app: FastifyInstance) {
 // Background processes (worker, relay) have no HTTP server, so give them one.
 export function serveMetrics(port = 9100) {
   http.createServer(async (_req, res) => {
-    res.setHeader('content-type', register.contentType);
-    res.end(await register.metrics());
+    // A failing collector (e.g. a shard that is down) must fail the scrape,
+    // not crash the process with an unhandled rejection.
+    try {
+      const body = await register.metrics();
+      res.setHeader('content-type', register.contentType);
+      res.end(body);
+    } catch (err) {
+      res.statusCode = 500;
+      res.end(String(err));
+    }
   }).listen(port);
 }

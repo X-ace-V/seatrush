@@ -1,16 +1,17 @@
 // End-to-end payment check: USERS users each hold a seat on event 1, then
 // send the payment 3 times at once with the same Idempotency-Key (a client
 // retrying after a timeout), then wait for the outcome.
-// Usage: node scripts/pay-check.ts [users]   then: npm run check
+// Usage: node scripts/pay-check.ts [users] [eventId]   then: npm run check
 const BASE = process.env.BASE_URL ?? 'http://localhost:8080';
 const USERS = Number(process.argv[2] ?? 500);
+const EVENT = Number(process.argv[3] ?? 1);
 const json = { 'content-type': 'application/json' };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const tally: Record<string, number> = {};
 const count = (k: string) => (tally[k] = (tally[k] ?? 0) + 1);
 
 async function user(i: number) {
-  const eventId = 1, seatNo = i + 1, userId = `payer${i}`, key = `pay-${i}`;
+  const eventId = EVENT, seatNo = i + 1, userId = `payer${i}`, key = `pay-${i}`;
   const hold = await fetch(`${BASE}/holds`, { method: 'POST', headers: json, body: JSON.stringify({ eventId, seatNo, userId }) });
   if (hold.status !== 201) return count(`hold ${hold.status}`);
 

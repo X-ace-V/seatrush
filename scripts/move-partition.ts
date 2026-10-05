@@ -1,0 +1,61 @@
+// Moves one logical partition to another shard while traffic keeps flowing.
+// Only that partition is unavailable, and only while its rows are copied.
+//   1. fence:  the source stops accepting writes for the partition (waits for
+//              in-flight writes to commit first, via the advisory lock)
+//   2. copy:   seats, bookings and payments go to the target, which then owns it
+//   3. flip:   the catalog points at the target; routers refresh within 1s, and
+//              stale ones hit the fence on the source (503, client retries)
+//   4. clean:  delete the old copies from the source
+// Outbox rows stay where they are: the relay publishes them from any shard.
+//
+// Every step is idempotent, so a move that died halfway (leaving the
+// partition owned by no shard, writes failing with 503) is finished by
+// simply running the same command again.
+// Usage: node scripts/move-partition.ts <partition> <toShard>
+import { shards, catalog, endAll } from '../src/shards.ts';
+
+const [part, to] = process.argv.slice(2).map(Number);
+const { rows: [{ shard: from }] } = await catalog.query('SELECT shard FROM partitions WHERE id = $1', [part]);
+if (from === to) { console.log(`partition ${part} is already on shard ${to}`); await endAll(); process.exit(0); }
+const [src, dst] = [shards[from].primary, shards[to].primary];
+const ms = (t: number) => `${Math.round(performance.now() - t)}ms`;
+const t0 = performance.now();
+
+// 1. Fence the source.
+const s = await src.connect();
+await s.query('BEGIN');
+await s.query('SELECT pg_advisory_xact_lock(4242, $1)', [part]);
+await s.query('DELETE FROM owned_partitions WHERE part = $1', [part]);
+await s.query('COMMIT');
+s.release();
+const fenced = performance.now();
+
+// 2. Copy. json_agg / json_populate_recordset moves whole rows in one round
+// trip per table. bookings.id is left out so the target's sequence assigns it.
+// The target claims ownership FIRST, inside the same transaction: its own
+// fence would otherwise reject the copied bookings and payments, and a failed
+// copy rolls the claim back with it.
+const tables = { seats: '*', bookings: 'event_id, seat_no, part, user_id, created_at', payments: '*' };
+const d = await dst.connect();
+const counts: Record<string, number> = {};
+await d.query('BEGIN');
+await d.query('INSERT INTO owned_partitions VALUES ($1) ON CONFLICT DO NOTHING', [part]);
+for (const [table, cols] of Object.entries(tables)) {
+  const { rows: [{ data }] } = await src.query(`SELECT coalesce(json_agg(t), '[]') AS data FROM ${table} t WHERE part = $1`, [part]);
+  const into = cols === '*' ? table : `${table} (${cols})`;
+  await d.query(`INSERT INTO ${into} SELECT ${cols} FROM json_populate_recordset(null::${table}, $1) ON CONFLICT DO NOTHING`, [JSON.stringify(data)]);
+  counts[table] = data.length;
+}
+await d.query('COMMIT');
+d.release();
+
+// 3. Flip the catalog. Writes for this partition were blocked from fence to here.
+await catalog.query('UPDATE partitions SET shard = $2 WHERE id = $1', [part, to]);
+const unavailable = ms(fenced);
+
+// 4. Clean up the source.
+for (const table of Object.keys(tables)) await src.query(`DELETE FROM ${table} WHERE part = $1`, [part]);
+
+console.log(`moved partition ${part}: shard ${from} -> ${to}, ` +
+  `${Object.entries(counts).map(([t, n]) => `${n} ${t}`).join(', ')}; writes blocked ${unavailable}, total ${ms(t0)}`);
+await endAll();

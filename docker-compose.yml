@@ -24,6 +24,10 @@ services:
     # PG_CPUS caps each shard's CPU, so one laptop can model shards as
     # separate fixed-size machines. Default 10 = effectively uncapped.
     cpus: ${PG_CPUS:-10}
+    # Replicas use slots, so the primary keeps WAL until each has consumed it.
+    # The cap stops a dead replica from filling the disk: past 2GB its slot is
+    # invalidated and it must be re-cloned. wal_level=logical is for CDC.
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_slot_wal_keep_size=2GB"]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init-primary.sh:/docker-entrypoint-initdb.d/init-primary.sh:ro
@@ -41,7 +45,8 @@ services:
     environment:
       PGPASSWORD: replicator
     command: >
-      bash -c "[ -s $$PGDATA/PG_VERSION ] || pg_basebackup -h postgres -U replicator -D $$PGDATA -R -X stream
+      bash -c "[ -s $$PGDATA/PG_VERSION ] || (psql 'host=postgres user=replicator dbname=seatrush' -c \"SELECT pg_create_physical_replication_slot('us_replica') WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'us_replica')\"
+      && pg_basebackup -h postgres -U replicator -D $$PGDATA -R -X stream -S us_replica)
       && chmod 700 $$PGDATA
       && exec postgres -c recovery_min_apply_delay=${REPLICA_DELAY:-0}"
     ports: ["5433:5432"]
@@ -114,7 +119,8 @@ services:
     environment:
       PGPASSWORD: replicator
     command: >
-      bash -c "[ -s $$PGDATA/PG_VERSION ] || pg_basebackup -h toxiproxy -p 15400 -U replicator -D $$PGDATA -R -X stream
+      bash -c "[ -s $$PGDATA/PG_VERSION ] || (psql 'host=toxiproxy port=15400 user=replicator dbname=seatrush' -c \"SELECT pg_create_physical_replication_slot('eu_replica') WHERE NOT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'eu_replica')\"
+      && pg_basebackup -h toxiproxy -p 15400 -U replicator -D $$PGDATA -R -X stream -S eu_replica)
       && chmod 700 $$PGDATA
       && exec postgres"
     healthcheck: *pg-health

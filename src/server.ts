@@ -187,8 +187,13 @@ app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/paymen
       await client.query('ROLLBACK');
       // Reuse `client`. Calling pool.query here while holding a client deadlocks
       // once every connection in the pool is held by a request doing the same.
-      const { rows } = await client.query('SELECT status FROM payments WHERE idempotency_key = $1', [key]);
-      return reply.code(200).send({ status: rows[0].status });
+      const { rows: [p] } = await client.query('SELECT status, event_id, seat_no, user_id FROM payments WHERE idempotency_key = $1', [key]);
+      // A retry must be the SAME request. A key reused for another seat used to
+      // get that other payment's status back: "captured", with nothing created.
+      if (p.event_id !== eventId || p.seat_no !== seatNo || p.user_id !== userId) {
+        return reply.code(422).send({ error: 'Idempotency-Key already used for a different payment' });
+      }
+      return reply.code(200).send({ status: p.status });
     }
     // Only the user holding an unexpired hold can pay for the seat.
     const claimed = await client.query(
@@ -225,7 +230,10 @@ app.get<{ Params: { id: string } }>('/events/:id/stats', async (req) => ({ sold:
 app.get<{ Params: { key: string }; Querystring: { eventId: string; seatNo: string } }>('/payments/:key', async (req, reply) => {
   if (await forwarded(req, reply, Number(req.query.eventId), Number(req.query.seatNo))) return reply;
   const { primary } = route(Number(req.query.eventId), Number(req.query.seatNo));
-  const { rows } = await primary.query('SELECT status FROM payments WHERE idempotency_key = $1', [req.params.key]);
+  const { rows } = await primary.query(
+    'SELECT status FROM payments WHERE idempotency_key = $1 AND event_id = $2 AND seat_no = $3',
+    [req.params.key, Number(req.query.eventId), Number(req.query.seatNo)],
+  );
   return rows[0] ?? reply.code(404).send({ error: 'unknown payment' });
 });
 

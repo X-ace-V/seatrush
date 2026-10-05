@@ -11,7 +11,7 @@ const tally: Record<string, number> = {};
 const count = (k: string) => (tally[k] = (tally[k] ?? 0) + 1);
 
 async function user(i: number) {
-  const eventId = EVENT, seatNo = i + 1, userId = `payer${i}`, key = `pay-${i}`;
+  const eventId = EVENT, seatNo = i + 1, userId = `payer${i}`, key = `pay-${EVENT}-${i}`;
   const hold = await fetch(`${BASE}/holds`, { method: 'POST', headers: json, body: JSON.stringify({ eventId, seatNo, userId }) });
   if (hold.status !== 201) return count(`hold ${hold.status}`);
 

@@ -12,5 +12,16 @@ services:
       interval: 2s
       retries: 15
 
+  # Stateless API. Scale with: docker compose up -d --scale app=N
+  # No host port: traffic enters through nginx so replicas don't fight over :3000.
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://seatrush:seatrush@postgres:5432/seatrush
+      PG_POOL_SIZE: ${PG_POOL_SIZE:-10}
+      LOG_LEVEL: warn
+    depends_on:
+      postgres: { condition: service_healthy }
+
 volumes:
   pgdata:

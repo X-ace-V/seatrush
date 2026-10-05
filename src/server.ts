@@ -3,9 +3,12 @@ import { pool, replica } from './db.ts';
 import { cached, redis } from './cache.ts';
 import { waitingRoom, waitingRoomOn, hasPass } from './waiting-room.ts';
 import { PAYMENT_REQUESTS } from './kafka.ts';
+import { instrument, watchPools } from './metrics.ts';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 
+instrument(app);
+watchPools({ primary: pool, replica });
 app.get('/health', async () => ({ ok: true }));
 waitingRoom(app);
 

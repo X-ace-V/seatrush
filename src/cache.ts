@@ -1,4 +1,5 @@
 import { Redis } from 'ioredis';
+import { cacheRequests } from './metrics.ts';
 
 export const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
 const ttlMs = Number(process.env.CACHE_TTL_MS ?? 1000);
@@ -15,9 +16,10 @@ const inflight = new Map<string, Promise<string>>();
 // already in flight in this process.
 export async function cached(key: string, load: () => Promise<unknown>): Promise<string> {
   const hit = await redis.get(key);
-  if (hit) return hit;
+  if (hit) { cacheRequests.inc({ result: 'hit' }); return hit; }
 
   let pending = inflight.get(key);
+  cacheRequests.inc({ result: pending ? 'coalesced' : 'miss' });
   if (!pending) {
     pending = (async () => {
       const json = JSON.stringify(await load());

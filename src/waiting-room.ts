@@ -8,6 +8,9 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { redis } from './cache.ts';
+import { client } from './metrics.ts';
+
+const queueEvents = new client.Counter({ name: 'queue_events_total', help: 'Waiting room joins and admissions', labelNames: ['event'] });
 
 export const waitingRoomOn = process.env.WAITING_ROOM === 'on';
 const admitPerSec = Number(process.env.ADMIT_PER_SEC ?? 2000);
@@ -34,6 +37,7 @@ export function waitingRoom(app: FastifyInstance) {
     const key = `queue:${req.params.eventId}`;
     await redis.set(`${key}:opened`, Date.now(), 'NX'); // first joiner opens the queue
     const position = await redis.incr(`${key}:size`);
+    queueEvents.inc({ event: 'joined' });
     return { position, ticket: sign(`${req.params.eventId}:${req.body.userId}:${position}`) };
   });
 
@@ -44,7 +48,10 @@ export function waitingRoom(app: FastifyInstance) {
 
     const opened = Number(await redis.get(`queue:${eventId}:opened`));
     const ahead = Number(position) - Math.floor(((Date.now() - opened) / 1000) * admitPerSec);
-    if (ahead <= 0) return { admitted: true, pass: sign(`${userId}:${Date.now() + passTtlMs}`) };
+    if (ahead <= 0) {
+      queueEvents.inc({ event: 'admitted' }); // counts admitted polls, so a user polling twice counts twice
+      return { admitted: true, pass: sign(`${userId}:${Date.now() + passTtlMs}`) };
+    }
 
     // Tell the client when to poll again, so waiting users do not hammer us.
     const retryAfter = Math.min(10, Math.max(1, Math.ceil(ahead / admitPerSec)));

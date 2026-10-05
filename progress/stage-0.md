@@ -60,7 +60,7 @@ Note: the 1000-seat number mostly measures the rejection path. The 100K-seat num
 ```bash
 docker compose up -d --wait
 npm install
-npm run seed                 # 1000 seats; or: npm run seed 400 250 for 100K
+npm run seed                 # 1 event, 1000 seats; npm run seed 100 40 25 for 100 events (100K seats)
 LOG_LEVEL=warn npm start
 npm run load                 # VUS, DURATION, SEATS env vars override defaults
 npm run check

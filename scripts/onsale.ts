@@ -42,14 +42,14 @@ async function user(rank: number) {
 
   for (let tries = 0; tries < MAX_TRIES; ) {
     calls.map++;
-    const seats: { id: number; status: string }[] = await fetch(`${BASE}/events/1/seats`).then((r) => r.json());
+    const seats: { seatNo: number; status: string }[] = await fetch(`${BASE}/events/1/sections/0/seats`).then((r) => r.json());
     const free = seats.filter((s) => s.status === 'free');
     if (!free.length) return { rank, won: false, ms: Date.now() - t0 }; // sold out
 
     calls.hold++;
     const res = await fetch(`${BASE}/holds`, {
       method: 'POST', headers,
-      body: JSON.stringify({ seatId: free[Math.floor(Math.random() * free.length)].id, userId }),
+      body: JSON.stringify({ eventId: 1, seatNo: free[Math.floor(Math.random() * free.length)].seatNo, userId }),
     });
     await res.arrayBuffer();
     if (res.status === 201) return { rank, won: true, ms: Date.now() - t0 };

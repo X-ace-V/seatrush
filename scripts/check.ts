@@ -6,16 +6,16 @@ import { pool } from '../src/db.ts';
 
 const { rows: [r] } = await pool.query(`
   SELECT
-    (SELECT count(*) FROM (SELECT seat_id FROM bookings GROUP BY seat_id HAVING count(*) > 1) d)::int AS double_booked,
-    (SELECT coalesce(sum(n - 1), 0) FROM (SELECT count(*) n FROM bookings GROUP BY seat_id) x)::int AS extra_bookings,
+    (SELECT count(*) FROM (SELECT 1 FROM bookings GROUP BY event_id, seat_no HAVING count(*) > 1) d)::int AS double_booked,
+    (SELECT coalesce(sum(n - 1), 0) FROM (SELECT count(*) n FROM bookings GROUP BY event_id, seat_no) x)::int AS extra_bookings,
     (SELECT count(*) FROM seats s WHERE status = 'booked'
-       AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.seat_id = s.id))::int AS booked_without_booking,
+       AND NOT EXISTS (SELECT 1 FROM bookings b WHERE (b.event_id, b.seat_no) = (s.event_id, s.seat_no)))::int AS booked_without_booking,
     (SELECT count(*) FROM seats s WHERE status <> 'booked'
-       AND EXISTS (SELECT 1 FROM bookings b WHERE b.seat_id = s.id))::int AS unbooked_with_booking,
+       AND EXISTS (SELECT 1 FROM bookings b WHERE (b.event_id, b.seat_no) = (s.event_id, s.seat_no)))::int AS unbooked_with_booking,
     (SELECT count(*) FROM provider_charges c
        WHERE NOT EXISTS (SELECT 1 FROM payments p WHERE p.idempotency_key = c.idempotency_key))::int AS charge_without_payment,
     (SELECT count(*) FROM payments p WHERE status = 'captured'
-       AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.seat_id = p.seat_id AND b.user_id = p.user_id))::int AS captured_without_booking,
+       AND NOT EXISTS (SELECT 1 FROM bookings b WHERE (b.event_id, b.seat_no) = (p.event_id, p.seat_no) AND b.user_id = p.user_id))::int AS captured_without_booking,
     (SELECT count(*) FROM payments WHERE status = 'pending')::int AS stuck_pending,
     (SELECT count(*) FROM payments WHERE status = 'captured')::int AS captured,
     (SELECT count(*) FROM bookings)::int AS total_bookings

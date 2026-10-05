@@ -8,21 +8,21 @@ const BASE = process.env.BASE_URL ?? 'http://localhost:8080';
 const attempts = Number(process.argv[2] ?? 200);
 let stale = 0, held = 0;
 
-for (let seatId = 1; seatId <= attempts; seatId++) {
+for (let seatNo = 1; seatNo <= attempts; seatNo++) {
   const res = await fetch(`${BASE}/holds`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ seatId, userId: 'lag-check' }),
+    body: JSON.stringify({ eventId: 1, seatNo, userId: 'lag-check' }),
   });
   if (res.status === 409) continue; // a concurrent load test took it first
-  if (res.status !== 201) throw new Error(`holding seat ${seatId} failed: ${res.status}`);
+  if (res.status !== 201) throw new Error(`holding seat ${seatNo} failed: ${res.status}`);
   held++;
   const { lsn } = await res.json();
 
-  const seats: { id: number; status: string }[] = await fetch(`${BASE}/events/1/seats`, {
+  const seats: { seatNo: number; status: string }[] = await fetch(`${BASE}/events/1/sections/0/seats`, {
     headers: lsn ? { 'x-min-lsn': lsn } : {},
   }).then((r) => r.json());
-  if (seats.find((s) => s.id === seatId)?.status !== 'held') stale++;
+  if (seats.find((s) => s.seatNo === seatNo)?.status !== 'held') stale++;
 }
 
 console.log(`${stale} of ${held} reads did not show the user's own hold (${(100 * stale / held).toFixed(1)}%)`);

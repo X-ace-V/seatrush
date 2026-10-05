@@ -16,6 +16,6 @@ export const options = {
 
 export default function () {
   const eventId = Math.random() < HOT ? 1 : 1 + Math.floor(Math.random() * EVENTS);
-  const res = http.get(`${BASE}/events/${eventId}/seats`);
+  const res = http.get(`${BASE}/events/${eventId}/sections/0/seats`);
   check(res, { 'ok': (r) => r.status === 200 });
 }

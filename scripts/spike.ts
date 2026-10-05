@@ -8,7 +8,7 @@ const [replicas = '1', rate = '20000', duration = '20s'] = process.argv.slice(2)
 const sh = (cmd: string) => execSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] }).toString();
 
 sh(`docker compose up -d --wait --scale app=${replicas}`);
-sh('node scripts/seed.ts 1000 40 25');
+sh('node scripts/seed.ts 1000 1000');
 mkdirSync('load/out', { recursive: true });
 try {
   sh(`docker run --rm --network seatrush_default -v ${process.cwd()}/load:/load ` +

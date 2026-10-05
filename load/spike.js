@@ -6,7 +6,8 @@ import http from 'k6/http';
 import { Counter } from 'k6/metrics';
 
 const BASE = __ENV.BASE_URL || 'http://nginx';
-const SEATS = Number(__ENV.SEATS || 1000000);
+const EVENTS = Number(__ENV.EVENTS || 1000);
+const SEATS = Number(__ENV.SEATS || 1000); // per event
 const RATE = Number(__ENV.RATE || 20000);
 
 const outcome = {
@@ -35,7 +36,9 @@ http.setResponseCallback(http.expectedStatuses(201, 409, 503));
 export default function () {
   const res = http.post(
     `${BASE}/holds`,
-    JSON.stringify({ seatId: 1 + Math.floor(Math.random() * SEATS), userId: `u${__VU}-${__ITER}` }),
+    JSON.stringify({
+      eventId: 1 + Math.floor(Math.random() * EVENTS), seatNo: 1 + Math.floor(Math.random() * SEATS), userId: `u${__VU}-${__ITER}`,
+    }),
     { headers: { 'Content-Type': 'application/json' }, timeout: '10s' },
   );
   const bucket = { 201: 'held', 409: 'taken', 503: 'rejected' }[res.status] || 'failed';

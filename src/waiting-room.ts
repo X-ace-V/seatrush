@@ -8,6 +8,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { redis } from './cache.ts';
+import { pool } from './db.ts';
 import { prom } from './metrics.ts';
 
 const queueEvents = new prom.Counter({ name: 'queue_events_total', help: 'Waiting room joins and admissions', labelNames: ['event'] });
@@ -32,6 +33,16 @@ export function hasPass(pass: string | undefined, userId: string) {
   return user === userId && Number(expires) > Date.now();
 }
 
+// Sections per event, read once: an event's size does not change.
+const sections = new Map<number, number>();
+async function sectionCount(eventId: number) {
+  if (!sections.has(eventId)) {
+    const { rows } = await pool.query('SELECT ceil(seat_count / 1000.0)::int AS n FROM events WHERE id = $1', [eventId]);
+    sections.set(eventId, rows[0]?.n ?? Infinity);
+  }
+  return sections.get(eventId)!;
+}
+
 export function waitingRoom(app: FastifyInstance) {
   app.post<{ Params: { eventId: string }; Body: { userId: string } }>('/queue/:eventId', async (req) => {
     const key = `queue:${req.params.eventId}`;
@@ -44,7 +55,7 @@ export function waitingRoom(app: FastifyInstance) {
   app.get<{ Params: { eventId: string } }>('/queue/:eventId/status', async (req, reply) => {
     const [eventId, userId, position] = verify(req.headers['x-queue-ticket'] as string)?.split(':') ?? [];
     if (eventId !== req.params.eventId) return reply.code(401).send({ error: 'bad ticket' });
-    if (await redis.exists(`soldout:${eventId}`)) return { admitted: false, soldOut: true };
+    if (await redis.scard(`soldout:${eventId}`) >= await sectionCount(Number(eventId))) return { admitted: false, soldOut: true };
 
     const opened = Number(await redis.get(`queue:${eventId}:opened`));
     const ahead = Number(position) - Math.floor(((Date.now() - opened) / 1000) * admitPerSec);

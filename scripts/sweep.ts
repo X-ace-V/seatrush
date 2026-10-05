@@ -23,10 +23,10 @@ console.log('| VUs | req/s | served/s | shed | p50 ms | p95 ms | p99 ms | errors
 console.log('|---|---|---|---|---|---|---|---|');
 
 for (const vus of levels) {
-  sh('node scripts/seed.ts 1000 40 25'); // 1000 events x 1000 seats = 1M, collisions are rare
+  sh('node scripts/seed.ts 1000 1000'); // 1000 events x 1000 seats = 1M, collisions are rare
   try {
     sh(`docker run --rm --network seatrush_default -v ${process.cwd()}/load:/load ` +
-      `-e VUS=${vus} -e DURATION=${duration} -e SEATS=1000000 ` +
+      `-e VUS=${vus} -e DURATION=${duration} ` +
       `grafana/k6 run --quiet --summary-export /load/out/summary.json /load/${script}`);
   } catch {} // k6 exits non-zero when the error threshold is crossed; we still want the row
 

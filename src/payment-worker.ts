@@ -29,7 +29,7 @@ async function charge(key: string): Promise<boolean> {
   return rows[0].approved;
 }
 
-async function handle(msg: { key: string; seatId: number; userId: string }) {
+async function handle(msg: { key: string; eventId: number; seatNo: number; userId: string }) {
   const stopTimer = providerSeconds.startTimer();
   const approved = await charge(msg.key);
   stopTimer();
@@ -41,12 +41,12 @@ async function handle(msg: { key: string; seatId: number; userId: string }) {
       [msg.key, approved ? 'captured' : 'declined'],
     );
     if (rowCount && approved) {
-      await client.query(`UPDATE seats SET status = 'booked' WHERE id = $1 AND status = 'paying'`, [msg.seatId]);
-      await client.query('INSERT INTO bookings (seat_id, user_id) VALUES ($1, $2)', [msg.seatId, msg.userId]);
+      await client.query(`UPDATE seats SET status = 'booked' WHERE event_id = $1 AND seat_no = $2 AND status = 'paying'`, [msg.eventId, msg.seatNo]);
+      await client.query('INSERT INTO bookings (event_id, seat_no, user_id) VALUES ($1, $2, $3)', [msg.eventId, msg.seatNo, msg.userId]);
     } else if (rowCount) {
       await client.query(
-        `UPDATE seats SET status = 'free', held_by = NULL, held_until = NULL WHERE id = $1 AND status = 'paying'`,
-        [msg.seatId],
+        `UPDATE seats SET status = 'free', held_by = NULL, held_until = NULL WHERE event_id = $1 AND seat_no = $2 AND status = 'paying'`,
+        [msg.eventId, msg.seatNo],
       );
     }
     await client.query('COMMIT');

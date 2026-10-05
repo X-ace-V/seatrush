@@ -27,28 +27,34 @@ async function freshReader(minLsn: string) {
   return rows[0].fresh ? replica : pool;
 }
 
+// Seat maps are served one 1000-seat section at a time, like real ticketing
+// sites: a 50K-seat stadium map would be megabytes of JSON.
 // An expired hold is reported as free: it is free, nobody has reclaimed it yet.
-const seatMap = (db: typeof pool, eventId: string) =>
+const SECTION_SIZE = 1000;
+const seatMap = (db: typeof pool, eventId: number, section: number) =>
   db.query(
-    `SELECT id, label,
+    `SELECT seat_no AS "seatNo", label,
             CASE WHEN status = 'held' AND held_until < now() THEN 'free' ELSE status END AS status
-     FROM seats WHERE event_id = $1 ORDER BY id`,
-    [eventId],
+     FROM seats WHERE event_id = $1 AND seat_no BETWEEN $2 AND $3 ORDER BY seat_no`,
+    [eventId, section * SECTION_SIZE + 1, (section + 1) * SECTION_SIZE],
   ).then((r) => r.rows);
 
 // Browsers get a seat map up to CACHE_TTL_MS stale. That is safe because the
 // booking itself is checked atomically on the primary. We do not invalidate
 // on each booking: on a hot event that would empty the cache constantly.
 // A user holding an x-min-lsn token skips the cache to see their own booking.
-app.get<{ Params: { id: string } }>('/events/:id/seats', async (req, reply) => {
+app.get<{ Params: { id: string; section: string } }>('/events/:id/sections/:section/seats', async (req, reply) => {
+  const [eventId, section] = [Number(req.params.id), Number(req.params.section)];
   const minLsn = req.headers['x-min-lsn'] as string | undefined;
-  if (minLsn) return seatMap(await freshReader(minLsn), req.params.id);
+  if (minLsn) return seatMap(await freshReader(minLsn), eventId, section);
 
-  const json = await cached(`seats:${req.params.id}`, async () => {
-    const seats = await seatMap(reader, req.params.id);
-    // Tell the waiting room, so queued users learn now instead of waiting
-    // their turn. TTL stays below the hold expiry, because expired holds free seats again.
-    if (!seats.some((s) => s.status === 'free')) await redis.set(`soldout:${req.params.id}`, 1, 'PX', 60_000);
+  const json = await cached(`seats:${eventId}:${section}`, async () => {
+    const seats = await seatMap(reader, eventId, section);
+    // Record sold-out sections so the waiting room can tell queued users the
+    // event is gone. TTL stays below the hold expiry, because expired holds free seats again.
+    if (seats.length && !seats.some((s) => s.status === 'free')) {
+      await redis.multi().sadd(`soldout:${eventId}`, section).pexpire(`soldout:${eventId}`, 60_000).exec();
+    }
     return seats;
   });
   return reply.type('application/json').send(json);
@@ -61,8 +67,8 @@ const maxDbQueue = Number(process.env.MAX_DB_QUEUE ?? Infinity);
 // the row lock lets exactly one concurrent request win.
 // Expired holds are reclaimed lazily right here (status = 'held' AND
 // held_until < now()), so no background job is needed to free them.
-app.post<{ Body: { seatId: number; userId: string } }>('/holds', async (req, reply) => {
-  const { seatId, userId } = req.body;
+app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/holds', async (req, reply) => {
+  const { eventId, seatNo, userId } = req.body;
 
   if (waitingRoomOn && !hasPass(req.headers['x-queue-pass'] as string, userId)) {
     return reply.code(403).send({ error: 'join the waiting room first' });
@@ -77,26 +83,26 @@ app.post<{ Body: { seatId: number; userId: string } }>('/holds', async (req, rep
 
   const { rows } = await pool.query(
     `UPDATE seats SET status = 'held', held_by = $2, held_until = now() + make_interval(secs => $3)
-     WHERE id = $1 AND (status = 'free' OR (status = 'held' AND held_until < now()))
+     WHERE event_id = $4 AND seat_no = $1 AND (status = 'free' OR (status = 'held' AND held_until < now()))
      RETURNING held_until`,
-    [seatId, userId, holdSeconds],
+    [seatNo, userId, holdSeconds, eventId],
   );
   if (!rows[0]) return reply.code(409).send({ error: 'seat unavailable' });
 
   // WAL position after our commit. Any replica that has replayed this far
   // can see the hold. Clients pass it back as x-min-lsn.
   const { rows: [{ lsn }] } = await pool.query('SELECT pg_current_wal_lsn()::text AS lsn');
-  return reply.code(201).send({ seatId, heldUntil: rows[0].held_until, lsn });
+  return reply.code(201).send({ eventId, seatNo, heldUntil: rows[0].held_until, lsn });
 });
 
 // Pay for a held seat. Returns 202 at once; the payment worker charges the
 // provider in the background, and GET /payments/:key reports the outcome.
 // Idempotency-Key is required: a client that times out and retries gets the
 // same payment back instead of starting a second one.
-app.post<{ Body: { seatId: number; userId: string } }>('/payments', async (req, reply) => {
+app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/payments', async (req, reply) => {
   const key = req.headers['idempotency-key'] as string | undefined;
   if (!key) return reply.code(400).send({ error: 'Idempotency-Key header required' });
-  const { seatId, userId } = req.body;
+  const { eventId, seatNo, userId } = req.body;
 
   const client = await pool.connect();
   try {
@@ -104,8 +110,8 @@ app.post<{ Body: { seatId: number; userId: string } }>('/payments', async (req, 
     // The primary key serializes duplicates: a concurrent retry blocks here
     // until the first commits, then conflicts and returns the existing payment.
     const inserted = await client.query(
-      'INSERT INTO payments (idempotency_key, seat_id, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-      [key, seatId, userId],
+      'INSERT INTO payments (idempotency_key, event_id, seat_no, user_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+      [key, eventId, seatNo, userId],
     );
     if (!inserted.rowCount) {
       await client.query('ROLLBACK');
@@ -117,8 +123,8 @@ app.post<{ Body: { seatId: number; userId: string } }>('/payments', async (req, 
     // Only the user holding an unexpired hold can pay for the seat.
     const claimed = await client.query(
       `UPDATE seats SET status = 'paying'
-       WHERE id = $1 AND status = 'held' AND held_by = $2 AND held_until > now()`,
-      [seatId, userId],
+       WHERE event_id = $3 AND seat_no = $1 AND status = 'held' AND held_by = $2 AND held_until > now()`,
+      [seatNo, userId, eventId],
     );
     if (!claimed.rowCount) {
       await client.query('ROLLBACK');
@@ -128,7 +134,7 @@ app.post<{ Body: { seatId: number; userId: string } }>('/payments', async (req, 
     // both exist or neither does; the relay publishes it (src/outbox-relay.ts).
     await client.query(
       'INSERT INTO outbox (topic, key, payload) VALUES ($1, $2, $3)',
-      [PAYMENT_REQUESTS, String(seatId), { key, seatId, userId }],
+      [PAYMENT_REQUESTS, `${eventId}:${seatNo}`, { key, eventId, seatNo, userId }],
     );
     await client.query('COMMIT');
   } catch (err) {

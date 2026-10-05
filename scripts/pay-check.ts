@@ -10,12 +10,12 @@ const tally: Record<string, number> = {};
 const count = (k: string) => (tally[k] = (tally[k] ?? 0) + 1);
 
 async function user(i: number) {
-  const seatId = i + 1, userId = `payer${i}`, key = `pay-${i}`;
-  const hold = await fetch(`${BASE}/holds`, { method: 'POST', headers: json, body: JSON.stringify({ seatId, userId }) });
+  const eventId = 1, seatNo = i + 1, userId = `payer${i}`, key = `pay-${i}`;
+  const hold = await fetch(`${BASE}/holds`, { method: 'POST', headers: json, body: JSON.stringify({ eventId, seatNo, userId }) });
   if (hold.status !== 201) return count(`hold ${hold.status}`);
 
   const pay = () => fetch(`${BASE}/payments`, {
-    method: 'POST', headers: { ...json, 'idempotency-key': key }, body: JSON.stringify({ seatId, userId }),
+    method: 'POST', headers: { ...json, 'idempotency-key': key }, body: JSON.stringify({ eventId, seatNo, userId }),
   }).then((r) => r.status).catch(() => 'network error');
   for (const status of await Promise.all([pay(), pay(), pay()])) count(`pay ${status}`);
 

@@ -9,7 +9,8 @@ const shed = new Counter('shed'); // 503: load shedding turned the request away
 
 // Default targets nginx on the compose network, skipping Docker Desktop's host port proxy.
 const BASE = __ENV.BASE_URL || 'http://nginx';
-const SEATS = Number(__ENV.SEATS || 1000);
+const EVENTS = Number(__ENV.EVENTS || 1000);
+const SEATS = Number(__ENV.SEATS || 1000); // per event
 
 export const options = {
   vus: Number(__ENV.VUS || 200),
@@ -22,10 +23,11 @@ export const options = {
 http.setResponseCallback(http.expectedStatuses(201, 409, 503));
 
 export default function () {
-  const seatId = 1 + Math.floor(Math.random() * SEATS);
+  const eventId = 1 + Math.floor(Math.random() * EVENTS);
+  const seatNo = 1 + Math.floor(Math.random() * SEATS);
   const res = http.post(
     `${BASE}/holds`,
-    JSON.stringify({ seatId, userId: `u${__VU}-${__ITER}` }),
+    JSON.stringify({ eventId, seatNo, userId: `u${__VU}-${__ITER}` }),
     { headers: { 'Content-Type': 'application/json' } },
   );
   if (res.status === 503) { shed.add(1); sleep(Number(res.headers['Retry-After'] || 1)); } // like a real client

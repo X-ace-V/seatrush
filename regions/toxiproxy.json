@@ -4,5 +4,6 @@
   { "name": "eu_shard2",      "listen": "0.0.0.0:15442", "upstream": "shard2:5432",    "enabled": true },
   { "name": "us_replication", "listen": "0.0.0.0:15400", "upstream": "postgres:5432",  "enabled": true },
   { "name": "us_api",         "listen": "0.0.0.0:18080", "upstream": "nginx:80",       "enabled": true },
+  { "name": "eu_redis",       "listen": "0.0.0.0:16379", "upstream": "redis-eu:6379",  "enabled": true },
   { "name": "eu_api",         "listen": "0.0.0.0:18081", "upstream": "nginx-eu:80",    "enabled": true }
 ]

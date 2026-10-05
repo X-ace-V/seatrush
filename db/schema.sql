@@ -75,3 +75,14 @@ END $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER seats_fence BEFORE UPDATE ON seats FOR EACH ROW EXECUTE FUNCTION fence();
 CREATE OR REPLACE TRIGGER bookings_fence BEFORE INSERT ON bookings FOR EACH ROW EXECUTE FUNCTION fence();
 CREATE OR REPLACE TRIGGER payments_fence BEFORE INSERT OR UPDATE ON payments FOR EACH ROW EXECUTE FUNCTION fence();
+
+-- Change data capture (src/cdc.ts) streams bookings from the WAL. A delete in
+-- the WAL only carries the replica identity, so make that the seat's key.
+ALTER TABLE bookings REPLICA IDENTITY USING INDEX bookings_event_id_seat_no_key;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'seatrush_cdc') THEN
+    CREATE PUBLICATION seatrush_cdc FOR TABLE bookings;
+  ELSE
+    ALTER PUBLICATION seatrush_cdc SET TABLE bookings;   -- the seed recreates the table
+  END IF;
+END $$;

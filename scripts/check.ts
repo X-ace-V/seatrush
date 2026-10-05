@@ -5,6 +5,9 @@
 //    booking, nothing stuck pending (run after the system has drained)
 //  - placement: every row sits on the shard that owns its partition, and each
 //    shard's fence (owned_partitions) agrees with the catalog
+//  - CDC: the sold-seats read model in each region's Redis matches the shards
+//    (eventually consistent, so run after the system has drained)
+import { Redis } from 'ioredis';
 import { shards, catalog, endAll } from '../src/shards.ts';
 
 const { rows: parts } = await catalog.query('SELECT id, shard FROM partitions');
@@ -28,18 +31,32 @@ const perShard = await Promise.all(shards.map(async (s, i) => {
       (SELECT count(*) FROM (SELECT part FROM owned_partitions EXCEPT SELECT unnest($1::int[])
          UNION ALL SELECT unnest($1::int[]) EXCEPT SELECT part FROM owned_partitions) x)::int AS fence_mismatch`, [owned]);
   const { rows: keys } = await s.primary.query('SELECT idempotency_key FROM payments');
-  return { ...r, keys: keys.map((k) => k.idempotency_key) };
+  const { rows: sold } = await s.primary.query('SELECT event_id, count(*)::int AS n FROM bookings GROUP BY event_id');
+  return { ...r, keys: keys.map((k) => k.idempotency_key), sold };
 }));
 
 const paymentKeys = new Set(perShard.flatMap((r) => r.keys));
 const { rows: charges } = await catalog.query('SELECT idempotency_key FROM provider_charges');
 const total: Record<string, number> = { charge_without_payment: charges.filter((c) => !paymentKeys.has(c.idempotency_key)).length };
-for (const r of perShard) for (const [k, v] of Object.entries(r)) if (k !== 'keys') total[k] = (total[k] ?? 0) + (v as number);
+for (const r of perShard) for (const [k, v] of Object.entries(r)) if (k !== 'keys' && k !== 'sold') total[k] = (total[k] ?? 0) + (v as number);
+
+// CDC read model vs the shards, per event, in each region.
+const soldInDb = new Map<number, number>();
+for (const r of perShard) for (const { event_id, n } of r.sold) soldInDb.set(event_id, (soldInDb.get(event_id) ?? 0) + n);
+for (const [region, url] of [['us', 'redis://localhost:6379'], ['eu', 'redis://localhost:6380']]) {
+  const redis = new Redis(url);
+  const events = new Set([...soldInDb.keys(), ...(await redis.keys('sold:*')).map((k) => Number(k.slice(5)))]);
+  let mismatched = 0;
+  for (const e of events) if ((await redis.scard(`sold:${e}`)) !== (soldInDb.get(e) ?? 0)) mismatched++;
+  total[`cdc_events_mismatched_${region}`] = mismatched;
+  redis.disconnect();
+}
 console.table(total);
 console.log('seats per shard:', perShard.map((r) => r.seats).join(' / '));
 await endAll();
 
 const bad = ['double_booked', 'booked_without_booking', 'unbooked_with_booking', 'charge_without_payment',
-  'captured_without_booking', 'stuck_pending', 'misplaced_rows', 'fence_mismatch'].filter((k) => total[k] !== 0);
+  'captured_without_booking', 'stuck_pending', 'misplaced_rows', 'fence_mismatch',
+  'cdc_events_mismatched_us', 'cdc_events_mismatched_eu'].filter((k) => total[k] !== 0);
 console.log(bad.length ? `INVARIANT VIOLATED: ${bad.join(', ')}` : 'INVARIANT OK');
 process.exit(bad.length ? 1 : 0);

@@ -102,6 +102,7 @@ services:
   redis-eu:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6380:6379"]
 
   # Same nginx config, pointed at app-eu.
   nginx-eu:
@@ -155,6 +156,7 @@ services:
   # connections each, under the default limit of 100, so no PgBouncer here.
   shard1: &shard
     image: postgres:16
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_slot_wal_keep_size=2GB"]
     environment:
       POSTGRES_USER: seatrush
       POSTGRES_PASSWORD: seatrush
@@ -226,6 +228,25 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]   # host access for the seed and invariant checker
+
+  # Change data capture: bookings from every shard's WAL into each region's
+  # Redis read model. Lives in us, so shard 2 and redis-eu are reached through
+  # the cross-region proxy.
+  cdc:
+    build: .
+    command: ["node", "src/cdc.ts"]
+    restart: unless-stopped
+    environment:
+      CDC_SOURCES: >-
+        ["postgres://seatrush:seatrush@postgres:5432/seatrush",
+         "postgres://seatrush:seatrush@shard1:5432/seatrush",
+         "postgres://seatrush:seatrush@toxiproxy:15442/seatrush"]
+      CDC_SINKS: redis://redis:6379,redis://toxiproxy:16379
+    depends_on:
+      shard1: { condition: service_healthy }
+      shard2: { condition: service_healthy }
+      toxiproxy: { condition: service_started }
 
   nginx:
     image: nginx:1.27-alpine

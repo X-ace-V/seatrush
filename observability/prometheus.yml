@@ -13,6 +13,8 @@ scrape_configs:
     relabel_configs: [{ target_label: region, replacement: eu }]
   - job_name: payment-worker
     dns_sd_configs: [{ names: [payment-worker], type: A, port: 9100, refresh_interval: 5s }]
+  - job_name: cdc
+    static_configs: [{ targets: ['cdc:9100'] }]
   - job_name: outbox-relay
     static_configs: [{ targets: ['outbox-relay:9100'] }]
   - job_name: postgres

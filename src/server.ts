@@ -216,6 +216,11 @@ app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/paymen
   return reply.code(202).send({ status: 'pending' });
 });
 
+// Seats sold per event, from the CDC read model in this region's Redis: no
+// query touches the shards. Eventually consistent: it trails commits by the
+// CDC lag.
+app.get<{ Params: { id: string } }>('/events/:id/stats', async (req) => ({ sold: await redis.scard(`sold:${req.params.id}`) }));
+
 // Payments live on the seat's shard, so the status lookup needs the seat too.
 app.get<{ Params: { key: string }; Querystring: { eventId: string; seatNo: string } }>('/payments/:key', async (req, reply) => {
   if (await forwarded(req, reply, Number(req.query.eventId), Number(req.query.seatNo))) return reply;

@@ -5,6 +5,7 @@
 //   default: 1 event x 1000 seats
 //   sweeps:  1000 events x 1000 seats = 1M
 import { readFileSync } from 'node:fs';
+import { Redis } from 'ioredis';
 import { shards, catalog, partitionOf, PARTITIONS, SECTION_SIZE, endAll } from '../src/shards.ts';
 
 const [events = 1, seats = 1000, hotSeats = seats] = process.argv.slice(2).map(Number);
@@ -42,6 +43,14 @@ await Promise.all(batches.map((b, i) => b.event.length && shards[i].primary.quer
    FROM unnest($1::int[], $2::int[], $3::int[], $4::int[]) AS u(event, f, t, part), generate_series(u.f, u.t) n`,
   [b.event, b.from, b.to, b.part],
 )));
+
+// The CDC read model describes the old data: clear it in both regions.
+for (const url of ['redis://localhost:6379', 'redis://localhost:6380']) {
+  const r = new Redis(url);
+  const keys = await r.keys('sold:*');
+  if (keys.length) await r.del(...keys);
+  r.disconnect();
+}
 
 console.log(`seeded ${events} event(s), ${seats} seats each, event 1 has ${hotSeats}; ${PARTITIONS} partitions on ${used} shard(s): ` +
   batches.map((b, i) => `shard${i}=${b.event.length} sections`).join(' '));

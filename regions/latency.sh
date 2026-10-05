@@ -6,7 +6,7 @@
 #        regions/latency.sh heal      undoes cut
 set -eu
 api=http://localhost:8474
-for p in us_shard0 us_shard1 eu_shard2 us_replication us_api eu_api; do
+for p in us_shard0 us_shard1 eu_shard2 us_replication us_api eu_api eu_redis; do
   for t in latency_up latency_down cut; do curl -s -o /dev/null -X DELETE $api/proxies/$p/toxics/$t; done
   case "$1" in
     heal) ;;

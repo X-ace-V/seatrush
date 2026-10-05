@@ -14,11 +14,13 @@ const sql = (file: string) => readFileSync(new URL(`../db/${file}`, import.meta.
 await catalog.query('DROP TABLE IF EXISTS events, partitions, provider_charges');
 await catalog.query(sql('catalog.sql'));
 await Promise.all(shards.map(async (s) => {
-  await s.primary.query('DROP TABLE IF EXISTS outbox, payments, bookings, seats');
+  await s.primary.query('DROP TABLE IF EXISTS owned_partitions, outbox, payments, bookings, seats');
   await s.primary.query(sql('schema.sql'));
 }));
 
 await catalog.query('INSERT INTO partitions SELECT p, p % $2 FROM generate_series(0, $1 - 1) p', [PARTITIONS, used]);
+await Promise.all(shards.map((s, i) => s.primary.query(
+  'INSERT INTO owned_partitions SELECT p FROM generate_series(0, $1 - 1) p WHERE p % $2 = $3', [PARTITIONS, used, i])));
 await catalog.query(
   `INSERT INTO events (name, seat_count)
    SELECT 'Event ' || n, CASE WHEN n = 1 THEN $2::int ELSE $3::int END FROM generate_series(1, $1) n`,

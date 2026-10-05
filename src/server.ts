@@ -11,6 +11,14 @@ instrument(app);
 watchPools(Object.fromEntries(shards.flatMap((s, i) => [[`shard${i}`, s.primary], ...(s.replica ? [[`shard${i}-replica`, s.replica]] : [])])));
 await startPartitionMapRefresh();
 app.get('/health', async () => ({ ok: true }));
+
+// SR001 = the shard fenced off a partition that just moved (see db/schema.sql).
+// The router's map catches up within a second, so the client just retries.
+app.setErrorHandler((err: Error & { code?: string }, _req, reply) => {
+  if (err.code === 'SR001') return reply.code(503).header('retry-after', '1').send({ error: 'partition moving, retry' });
+  reply.log.error(err);
+  return reply.code(500).send({ error: 'internal error' });
+});
 waitingRoom(app);
 
 type Shard = ReturnType<typeof route>;

@@ -6,11 +6,30 @@ services:
       POSTGRES_PASSWORD: seatrush
       POSTGRES_DB: seatrush
     ports: ["5432:5432"]
-    volumes: [pgdata:/var/lib/postgresql/data]
-    healthcheck:
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init-primary.sh:/docker-entrypoint-initdb.d/init-primary.sh:ro
+    healthcheck: &pg-health
       test: ["CMD", "pg_isready", "-U", "seatrush"]
       interval: 2s
-      retries: 15
+      retries: 30
+
+  # Streaming read replica. On first start it clones the primary with
+  # pg_basebackup (-R writes the standby config), then replays WAL forever.
+  # REPLICA_DELAY injects replication lag, e.g. REPLICA_DELAY=500ms.
+  postgres-replica:
+    image: postgres:16
+    user: postgres
+    environment:
+      PGPASSWORD: replicator
+    command: >
+      bash -c "[ -s $$PGDATA/PG_VERSION ] || pg_basebackup -h postgres -U replicator -D $$PGDATA -R -X stream
+      && chmod 700 $$PGDATA
+      && exec postgres -c recovery_min_apply_delay=${REPLICA_DELAY:-0}"
+    ports: ["5433:5432"]
+    healthcheck: *pg-health
+    depends_on:
+      postgres: { condition: service_healthy }
 
   # Stateless API. Scale with: docker compose up -d --scale app=N
   # No host port: traffic enters through nginx so replicas don't fight over :3000.
@@ -18,17 +37,18 @@ services:
     build: .
     environment:
       DATABASE_URL: postgres://seatrush:seatrush@pgbouncer:5432/seatrush
+      REPLICA_URL: postgres://seatrush:seatrush@pgbouncer-replica:5432/seatrush
       PG_POOL_SIZE: ${PG_POOL_SIZE:-10}
       LOG_LEVEL: warn
-    depends_on: [pgbouncer]
+    depends_on: [pgbouncer, pgbouncer-replica]
 
   # Connection pooler. Apps may open thousands of client connections;
   # pgbouncer multiplexes them onto DEFAULT_POOL_SIZE real Postgres connections.
   # Transaction mode returns a server connection to the pool after every
   # transaction, which is safe because each booking is a single statement.
-  pgbouncer:
+  pgbouncer: &pgbouncer
     image: edoburu/pgbouncer:v1.26.0-p0
-    environment:
+    environment: &pgb-env
       DATABASE_URL: postgres://seatrush:seatrush@postgres:5432/seatrush
       AUTH_TYPE: scram-sha-256
       POOL_MODE: transaction
@@ -36,6 +56,15 @@ services:
       DEFAULT_POOL_SIZE: ${PGB_POOL_SIZE:-40}
     depends_on:
       postgres: { condition: service_healthy }
+
+  # Same pooler, pointed at the replica, for read traffic.
+  pgbouncer-replica:
+    <<: *pgbouncer
+    environment:
+      <<: *pgb-env
+      DATABASE_URL: postgres://seatrush:seatrush@postgres-replica:5432/seatrush
+    depends_on:
+      postgres-replica: { condition: service_healthy }
 
   nginx:
     image: nginx:1.27-alpine

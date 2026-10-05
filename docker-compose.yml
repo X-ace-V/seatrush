@@ -40,8 +40,10 @@ services:
       REPLICA_URL: postgres://seatrush:seatrush@pgbouncer-replica:5432/seatrush
       PG_POOL_SIZE: ${PG_POOL_SIZE:-10}
       READS_FROM: ${READS_FROM:-replica}
+      REDIS_URL: redis://redis:6379
+      CACHE_TTL_MS: ${CACHE_TTL_MS:-1000}
       LOG_LEVEL: warn
-    depends_on: [pgbouncer, pgbouncer-replica]
+    depends_on: [pgbouncer, pgbouncer-replica, redis]
 
   # Connection pooler. Apps may open thousands of client connections;
   # pgbouncer multiplexes them onto DEFAULT_POOL_SIZE real Postgres connections.
@@ -66,6 +68,11 @@ services:
       DATABASE_URL: postgres://seatrush:seatrush@postgres-replica:5432/seatrush
     depends_on:
       postgres-replica: { condition: service_healthy }
+
+  # Seat map cache. Nothing durable lives here, so no persistence.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
 
   nginx:
     image: nginx:1.27-alpine

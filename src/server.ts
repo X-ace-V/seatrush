@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import { pool, replica } from './db.ts';
+import { cached } from './cache.ts';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 
@@ -14,19 +15,26 @@ const reader = process.env.READS_FROM === 'primary' ? pool : replica;
 // from the primary instead so the user always sees their own booking.
 // This must be a separate query BEFORE the read: checking inside the same
 // query would race, because the read's snapshot is taken first.
-async function freshReader(minLsn?: string) {
-  if (!minLsn || reader === pool) return reader;
+async function freshReader(minLsn: string) {
+  if (reader === pool) return reader;
   const { rows } = await replica.query('SELECT pg_last_wal_replay_lsn() >= $1::pg_lsn AS fresh', [minLsn]);
   return rows[0].fresh ? replica : pool;
 }
 
-app.get<{ Params: { id: string } }>('/events/:id/seats', async (req) => {
-  const db = await freshReader(req.headers['x-min-lsn'] as string | undefined);
-  const { rows } = await db.query(
-    'SELECT id, label, status FROM seats WHERE event_id = $1 ORDER BY id',
-    [req.params.id],
-  );
-  return rows;
+const seatMap = (db: typeof pool, eventId: string) =>
+  db.query('SELECT id, label, status FROM seats WHERE event_id = $1 ORDER BY id', [eventId])
+    .then((r) => r.rows);
+
+// Browsers get a seat map up to CACHE_TTL_MS stale. That is safe because the
+// booking itself is checked atomically on the primary. We do not invalidate
+// on each booking: on a hot event that would empty the cache constantly.
+// A user holding an x-min-lsn token skips the cache to see their own booking.
+app.get<{ Params: { id: string } }>('/events/:id/seats', async (req, reply) => {
+  const minLsn = req.headers['x-min-lsn'] as string | undefined;
+  if (minLsn) return seatMap(await freshReader(minLsn), req.params.id);
+
+  const json = await cached(`seats:${req.params.id}`, () => seatMap(reader, req.params.id));
+  return reply.type('application/json').send(json);
 });
 
 // Claim and record the seat in ONE atomic statement.

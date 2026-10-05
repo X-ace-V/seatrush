@@ -22,8 +22,26 @@ console.log(`\n${script}, ${replicas} replica(s), ${duration} per level\n`);
 console.log('| VUs | req/s | served/s | shed | p50 ms | p95 ms | p99 ms | errors |');
 console.log('|---|---|---|---|---|---|---|---|');
 
+// Wait until holds really go through on every shard. After a database
+// restart PgBouncer rejects logins for server_login_retry (15s) with a cached
+// error, and a level measured inside that window is meaningless. 20 events
+// hash across all 12 partitions, so every shard gets probed.
+async function waitUntilServing() {
+  const hold = (eventId: number, seatNo: number) => fetch('http://localhost:8080/holds', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ eventId, seatNo, userId: 'warmup' }),
+  }).then((r) => r.status, () => 0);
+  for (let i = 1; i <= 60; i++) {
+    const statuses = await Promise.all(Array.from({ length: 20 }, (_, e) => hold(e + 1, i)));
+    if (statuses.every((s) => s === 201 || s === 409)) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error('stack never became ready');
+}
+
 for (const vus of levels) {
   sh('node scripts/seed.ts 1000 1000'); // 1000 events x 1000 seats = 1M, collisions are rare
+  await waitUntilServing();
   try {
     sh(`docker run --rm --network seatrush_default -v ${process.cwd()}/load:/load ` +
       `-e VUS=${vus} -e DURATION=${duration} ` +

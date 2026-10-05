@@ -14,6 +14,9 @@ services:
       POSTGRES_PASSWORD: seatrush
       POSTGRES_DB: seatrush
     ports: ["5432:5432"]
+    # PG_CPUS caps each shard's CPU, so one laptop can model shards as
+    # separate fixed-size machines. Default 10 = effectively uncapped.
+    cpus: ${PG_CPUS:-10}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init-primary.sh:/docker-entrypoint-initdb.d/init-primary.sh:ro
@@ -91,6 +94,7 @@ services:
       POSTGRES_PASSWORD: seatrush
       POSTGRES_DB: seatrush
     ports: ["5441:5432"]
+    cpus: ${PG_CPUS:-10}
     healthcheck: *pg-health
 
   shard2:

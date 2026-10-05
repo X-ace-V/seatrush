@@ -40,13 +40,14 @@ export function waitingRoom(app: FastifyInstance) {
   app.get<{ Params: { eventId: string } }>('/queue/:eventId/status', async (req, reply) => {
     const [eventId, userId, position] = verify(req.headers['x-queue-ticket'] as string)?.split(':') ?? [];
     if (eventId !== req.params.eventId) return reply.code(401).send({ error: 'bad ticket' });
+    if (await redis.exists(`soldout:${eventId}`)) return { admitted: false, soldOut: true };
 
     const opened = Number(await redis.get(`queue:${eventId}:opened`));
     const ahead = Number(position) - Math.floor(((Date.now() - opened) / 1000) * admitPerSec);
     if (ahead <= 0) return { admitted: true, pass: sign(`${userId}:${Date.now() + passTtlMs}`) };
 
     // Tell the client when to poll again, so waiting users do not hammer us.
-    const retryAfter = Math.min(30, Math.max(1, Math.ceil(ahead / admitPerSec)));
+    const retryAfter = Math.min(10, Math.max(1, Math.ceil(ahead / admitPerSec)));
     return reply.header('retry-after', String(retryAfter)).send({ admitted: false, ahead });
   });
 }

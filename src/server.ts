@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { pool, replica } from './db.ts';
-import { cached } from './cache.ts';
+import { cached, redis } from './cache.ts';
 import { waitingRoom, waitingRoomOn, hasPass } from './waiting-room.ts';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
@@ -40,7 +40,13 @@ app.get<{ Params: { id: string } }>('/events/:id/seats', async (req, reply) => {
   const minLsn = req.headers['x-min-lsn'] as string | undefined;
   if (minLsn) return seatMap(await freshReader(minLsn), req.params.id);
 
-  const json = await cached(`seats:${req.params.id}`, () => seatMap(reader, req.params.id));
+  const json = await cached(`seats:${req.params.id}`, async () => {
+    const seats = await seatMap(reader, req.params.id);
+    // Tell the waiting room, so queued users learn now instead of waiting
+    // their turn. TTL stays below the hold expiry, because expired holds free seats again.
+    if (!seats.some((s) => s.status === 'free')) await redis.set(`soldout:${req.params.id}`, 1, 'PX', 60_000);
+    return seats;
+  });
   return reply.type('application/json').send(json);
 });
 

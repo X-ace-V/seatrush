@@ -2,6 +2,8 @@ import Fastify from 'fastify';
 import { pool, replica } from './db.ts';
 import { cached, redis } from './cache.ts';
 import { waitingRoom, waitingRoomOn, hasPass } from './waiting-room.ts';
+import { Partitioners } from 'kafkajs';
+import { kafka, ensureTopics, PAYMENT_REQUESTS } from './kafka.ts';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 
@@ -83,6 +85,67 @@ app.post<{ Body: { seatId: number; userId: string } }>('/holds', async (req, rep
   // can see the hold. Clients pass it back as x-min-lsn.
   const { rows: [{ lsn }] } = await pool.query('SELECT pg_current_wal_lsn()::text AS lsn');
   return reply.code(201).send({ seatId, heldUntil: rows[0].held_until, lsn });
+});
+
+// Pay for a held seat. Returns 202 at once; the payment worker charges the
+// provider in the background, and GET /payments/:key reports the outcome.
+// Idempotency-Key is required: a client that times out and retries gets the
+// same payment back instead of starting a second one.
+await ensureTopics();
+const producer = kafka.producer({ createPartitioner: Partitioners.DefaultPartitioner });
+await producer.connect();
+
+app.post<{ Body: { seatId: number; userId: string } }>('/payments', async (req, reply) => {
+  const key = req.headers['idempotency-key'] as string | undefined;
+  if (!key) return reply.code(400).send({ error: 'Idempotency-Key header required' });
+  const { seatId, userId } = req.body;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // The primary key serializes duplicates: a concurrent retry blocks here
+    // until the first commits, then conflicts and returns the existing payment.
+    const inserted = await client.query(
+      'INSERT INTO payments (idempotency_key, seat_id, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+      [key, seatId, userId],
+    );
+    if (!inserted.rowCount) {
+      await client.query('ROLLBACK');
+      // Reuse `client`. Calling pool.query here while holding a client deadlocks
+      // once every connection in the pool is held by a request doing the same.
+      const { rows } = await client.query('SELECT status FROM payments WHERE idempotency_key = $1', [key]);
+      return reply.code(200).send({ status: rows[0].status });
+    }
+    // Only the user holding an unexpired hold can pay for the seat.
+    const claimed = await client.query(
+      `UPDATE seats SET status = 'paying'
+       WHERE id = $1 AND status = 'held' AND held_by = $2 AND held_until > now()`,
+      [seatId, userId],
+    );
+    if (!claimed.rowCount) {
+      await client.query('ROLLBACK');
+      return reply.code(409).send({ error: 'no active hold on this seat' });
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // NAIVE dual write: the payment is committed, now tell Kafka. If this send
+  // fails or the process dies here, the payment stays 'pending' forever.
+  await producer.send({
+    topic: PAYMENT_REQUESTS,
+    messages: [{ key: String(seatId), value: JSON.stringify({ key, seatId, userId }) }],
+  });
+  return reply.code(202).send({ status: 'pending' });
+});
+
+app.get<{ Params: { key: string } }>('/payments/:key', async (req, reply) => {
+  const { rows } = await pool.query('SELECT status FROM payments WHERE idempotency_key = $1', [req.params.key]);
+  return rows[0] ?? reply.code(404).send({ error: 'unknown payment' });
 });
 
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' });

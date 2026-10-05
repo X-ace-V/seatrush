@@ -18,8 +18,9 @@ sh(`docker compose up -d --wait --scale app=${replicas}`);
 mkdirSync('load/out', { recursive: true });
 
 console.log(`\n${script}, ${replicas} replica(s), ${duration} per level\n`);
-console.log('| VUs | req/s | p50 ms | p95 ms | p99 ms | errors |');
-console.log('|---|---|---|---|---|---|');
+// served/s excludes 503s from load shedding: those are fast "come back later" answers.
+console.log('| VUs | req/s | served/s | shed | p50 ms | p95 ms | p99 ms | errors |');
+console.log('|---|---|---|---|---|---|---|---|');
 
 for (const vus of levels) {
   sh('node scripts/seed.ts 1000 40 25'); // 1000 events x 1000 seats = 1M, collisions are rare
@@ -32,5 +33,6 @@ for (const vus of levels) {
   const m = JSON.parse(readFileSync('load/out/summary.json', 'utf8')).metrics;
   const d = m.http_req_duration;
   const f = (n: number) => n.toFixed(1);
-  console.log(`| ${vus} | ${Math.round(m.http_reqs.rate)} | ${f(d['p(50)'])} | ${f(d['p(95)'])} | ${f(d['p(99)'])} | ${(m.http_req_failed.value * 100).toFixed(2)}% |`);
+  const shedShare = (m.shed?.count ?? 0) / m.http_reqs.count;
+  console.log(`| ${vus} | ${Math.round(m.http_reqs.rate)} | ${Math.round(m.http_reqs.rate * (1 - shedShare))} | ${(shedShare * 100).toFixed(0)}% | ${f(d['p(50)'])} | ${f(d['p(95)'])} | ${f(d['p(99)'])} | ${(m.http_req_failed.value * 100).toFixed(2)}% |`);
 }

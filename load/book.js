@@ -2,7 +2,10 @@
 // Each iteration tries to hold a random seat. 201 = got it, 409 = taken.
 // Run via: npm run load   (k6 runs in Docker, no install needed)
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
+import { Counter } from 'k6/metrics';
+
+const shed = new Counter('shed'); // 503: load shedding turned the request away
 
 // Default targets nginx on the compose network, skipping Docker Desktop's host port proxy.
 const BASE = __ENV.BASE_URL || 'http://nginx';
@@ -15,8 +18,8 @@ export const options = {
   thresholds: { http_req_failed: [{ threshold: 'rate<0.01' }] },
 };
 
-// 409 is an expected outcome in a sale, not a failure.
-http.setResponseCallback(http.expectedStatuses(201, 409));
+// 409 (taken) and 503 (shed) are expected outcomes in a sale, not failures.
+http.setResponseCallback(http.expectedStatuses(201, 409, 503));
 
 export default function () {
   const seatId = 1 + Math.floor(Math.random() * SEATS);
@@ -25,5 +28,6 @@ export default function () {
     JSON.stringify({ seatId, userId: `u${__VU}-${__ITER}` }),
     { headers: { 'Content-Type': 'application/json' } },
   );
-  check(res, { 'held or taken': (r) => r.status === 201 || r.status === 409 });
+  if (res.status === 503) { shed.add(1); sleep(Number(res.headers['Retry-After'] || 1)); } // like a real client
+  check(res, { 'held, taken or shed': (r) => [201, 409, 503].includes(r.status) });
 }

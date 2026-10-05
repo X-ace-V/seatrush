@@ -2,7 +2,9 @@
 
 A flash-sale ticket booking system, scaled one stage at a time. Each stage is load tested, deliberately broken, and fixed. The rule that must never break: **no seat is sold twice.**
 
-Stack: Node 22 + TypeScript, Fastify, Postgres (primary + replica), PgBouncer, Redis, Kafka, nginx, k6.
+Stack: Node 22 + TypeScript, Fastify, Postgres (primary + replica), PgBouncer, Redis, Kafka, nginx, Prometheus, Grafana, k6.
+
+![dashboard during a chaos run](progress/img/dashboard-chaos-after.png)
 
 Per-stage notes (what we built, what failed, numbers) live in [`progress/`](progress).
 
@@ -12,6 +14,7 @@ Per-stage notes (what we built, what failed, numbers) live in [`progress/`](prog
 | 1 | stateless app servers, connection pooling | done |
 | 2 | caching, read replicas | done |
 | 3 | waiting room, queues, idempotency | done |
+| obs | Prometheus + Grafana dashboard | done |
 | 4 | partitioning, hot partitions | |
 | 5 | multi-region, CDC | |
 

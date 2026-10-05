@@ -15,7 +15,6 @@ const script = process.env.SCRIPT ?? 'book.js'; // or browse.js for the read pat
 const sh = (cmd: string) => execSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] }).toString();
 
 sh(`docker compose up -d --wait --scale app=${replicas}`);
-sh('docker compose restart nginx'); // pick up the new replica IPs
 mkdirSync('load/out', { recursive: true });
 
 console.log(`\n${script}, ${replicas} replica(s), ${duration} per level\n`);

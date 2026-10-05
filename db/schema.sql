@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE TABLE IF NOT EXISTS provider_charges (
   idempotency_key  text PRIMARY KEY,
   approved         boolean NOT NULL,
+  attempts         int  NOT NULL DEFAULT 1,  -- >1 means a redelivery that would have double charged without the key
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 

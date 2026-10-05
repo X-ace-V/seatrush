@@ -15,8 +15,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function charge(key: string): Promise<boolean> {
   await sleep(50 + Math.random() * 100);
   const approved = createHash('sha256').update(key).digest()[0] >= 26;
-  await pool.query('INSERT INTO provider_charges VALUES ($1, $2) ON CONFLICT DO NOTHING', [key, approved]);
-  const { rows } = await pool.query('SELECT approved FROM provider_charges WHERE idempotency_key = $1', [key]);
+  // Same key again: the provider returns the original result instead of charging.
+  const { rows } = await pool.query(
+    `INSERT INTO provider_charges (idempotency_key, approved) VALUES ($1, $2)
+     ON CONFLICT (idempotency_key) DO UPDATE SET attempts = provider_charges.attempts + 1
+     RETURNING approved`,
+    [key, approved],
+  );
   return rows[0].approved;
 }
 

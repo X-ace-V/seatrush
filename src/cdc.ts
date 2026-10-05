@@ -54,8 +54,18 @@ async function follow(url: string, shard: number) {
       }));
       const timer = setInterval(() => flush().catch(() => {}), 50);
 
+      // CDC sees physical row changes, not business events. A partition move
+      // inserts copies on one shard and deletes the originals on another; read
+      // literally, the deletes un-sold every seat in the moved partition (an
+      // event with 268 seats sold showed 0). Moves run under the replication
+      // origin 'rebalance', which pgoutput reports at the start of each such
+      // transaction, so those changes are skipped.
+      let fromRebalance = false;
       service.on('data', async (lsn: string, msg: any) => {
-        if (msg.relation?.name === 'bookings' && (msg.tag === 'insert' || msg.tag === 'delete')) {
+        if (msg.tag === 'begin') fromRebalance = false;
+        if (msg.tag === 'origin') fromRebalance = msg.originName === 'rebalance';
+        if (fromRebalance && (msg.tag === 'insert' || msg.tag === 'delete')) applied.inc({ shard, op: 'rebalance_skipped' });
+        else if (msg.relation?.name === 'bookings' && (msg.tag === 'insert' || msg.tag === 'delete')) {
           const row = msg.tag === 'insert' ? msg.new : msg.key;
           pending.push({ add: msg.tag === 'insert', key: `sold:${row.event_id}`, seat: row.seat_no });
         }

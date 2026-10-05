@@ -9,8 +9,20 @@ app.get('/health', async () => ({ ok: true }));
 // on the primary. READS_FROM=primary switches back, for comparison runs.
 const reader = process.env.READS_FROM === 'primary' ? pool : replica;
 
+// Read-your-writes: a client that just booked sends back the `lsn` it got
+// (x-min-lsn). If the replica has not replayed up to that point yet, read
+// from the primary instead so the user always sees their own booking.
+// This must be a separate query BEFORE the read: checking inside the same
+// query would race, because the read's snapshot is taken first.
+async function freshReader(minLsn?: string) {
+  if (!minLsn || reader === pool) return reader;
+  const { rows } = await replica.query('SELECT pg_last_wal_replay_lsn() >= $1::pg_lsn AS fresh', [minLsn]);
+  return rows[0].fresh ? replica : pool;
+}
+
 app.get<{ Params: { id: string } }>('/events/:id/seats', async (req) => {
-  const { rows } = await reader.query(
+  const db = await freshReader(req.headers['x-min-lsn'] as string | undefined);
+  const { rows } = await db.query(
     'SELECT id, label, status FROM seats WHERE event_id = $1 ORDER BY id',
     [req.params.id],
   );
@@ -33,7 +45,11 @@ app.post<{ Body: { seatId: number; userId: string } }>('/bookings', async (req, 
   );
 
   if (!rows[0]) return reply.code(409).send({ error: 'seat unavailable' });
-  return reply.code(201).send({ bookingId: rows[0].id });
+
+  // WAL position after our commit. Any replica that has replayed this far
+  // can see the booking. Clients pass it back as x-min-lsn.
+  const { rows: [{ lsn }] } = await pool.query('SELECT pg_current_wal_lsn()::text AS lsn');
+  return reply.code(201).send({ bookingId: rows[0].id, lsn });
 });
 
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' });

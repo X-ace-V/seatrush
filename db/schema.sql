@@ -24,3 +24,22 @@ CREATE TABLE IF NOT EXISTS bookings (
   user_id     text NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- One row per payment attempt. The client sends an Idempotency-Key; a retry
+-- with the same key finds this row instead of creating a second payment.
+CREATE TABLE IF NOT EXISTS payments (
+  idempotency_key  text PRIMARY KEY,
+  seat_id          int  NOT NULL REFERENCES seats(id),
+  user_id          text NOT NULL,
+  status           text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'captured', 'declined')),
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+-- Stands in for the payment provider's own ledger (Stripe's side, not ours).
+-- Keyed by our idempotency key, like a real provider, so a retried charge
+-- returns the first result instead of charging again.
+CREATE TABLE IF NOT EXISTS provider_charges (
+  idempotency_key  text PRIMARY KEY,
+  approved         boolean NOT NULL,
+  created_at       timestamptz NOT NULL DEFAULT now()
+);

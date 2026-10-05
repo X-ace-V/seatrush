@@ -43,11 +43,16 @@ services:
       REDIS_URL: redis://redis:6379
       CACHE_TTL_MS: ${CACHE_TTL_MS:-1000}
       HOLD_SECONDS: ${HOLD_SECONDS:-300}
+      KAFKA_BROKERS: kafka:9092
       MAX_DB_QUEUE: ${MAX_DB_QUEUE:-10}
       WAITING_ROOM: ${WAITING_ROOM:-off}
       ADMIT_PER_SEC: ${ADMIT_PER_SEC:-2000}
       LOG_LEVEL: warn
-    depends_on: [pgbouncer, pgbouncer-replica, redis]
+    depends_on:
+      pgbouncer: { condition: service_started }
+      pgbouncer-replica: { condition: service_started }
+      redis: { condition: service_started }
+      kafka: { condition: service_healthy }
     # Ready means serving HTTP, not just "process started". `up --wait` blocks on this.
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
@@ -77,6 +82,38 @@ services:
       DATABASE_URL: postgres://seatrush:seatrush@postgres-replica:5432/seatrush
     depends_on:
       postgres-replica: { condition: service_healthy }
+
+  # Single-node Kafka in KRaft mode (no ZooKeeper). Pinned to 3.9 because
+  # kafkajs does not support the protocol versions Kafka 4 dropped.
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 5s
+      retries: 20
+
+  # Consumes payment requests from Kafka and charges the (simulated) provider.
+  payment-worker:
+    build: .
+    command: ["node", "src/payment-worker.ts"]
+    environment:
+      DATABASE_URL: postgres://seatrush:seatrush@pgbouncer:5432/seatrush
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      kafka: { condition: service_healthy }
+      pgbouncer: { condition: service_started }
 
   # Seat map cache. Nothing durable lives here, so no persistence.
   redis:

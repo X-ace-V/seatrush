@@ -13,22 +13,23 @@ app.get<{ Params: { id: string } }>('/events/:id/seats', async (req) => {
   return rows;
 });
 
-// NAIVE: check-then-act with no lock. Two requests can both see "free"
-// before either one writes, and both get a booking.
+// Claim and record the seat in ONE atomic statement.
+// The UPDATE takes a row lock. A concurrent request for the same seat waits
+// on that lock, then re-checks status = 'free', finds it false, and matches
+// zero rows. So exactly one request wins and the rest get 409.
 app.post<{ Body: { seatId: number; userId: string } }>('/bookings', async (req, reply) => {
   const { seatId, userId } = req.body;
 
-  const { rows } = await pool.query('SELECT status FROM seats WHERE id = $1', [seatId]);
-  if (!rows[0]) return reply.code(404).send({ error: 'seat not found' });
-  if (rows[0].status !== 'free') return reply.code(409).send({ error: 'seat taken' });
-
-  const booking = await pool.query(
-    'INSERT INTO bookings (seat_id, user_id) VALUES ($1, $2) RETURNING id',
+  const { rows } = await pool.query(
+    `WITH claimed AS (
+       UPDATE seats SET status = 'booked' WHERE id = $1 AND status = 'free' RETURNING id
+     )
+     INSERT INTO bookings (seat_id, user_id) SELECT id, $2 FROM claimed RETURNING id`,
     [seatId, userId],
   );
-  await pool.query(`UPDATE seats SET status = 'booked' WHERE id = $1`, [seatId]);
 
-  return reply.code(201).send({ bookingId: booking.rows[0].id });
+  if (!rows[0]) return reply.code(409).send({ error: 'seat unavailable' });
+  return reply.code(201).send({ bookingId: rows[0].id });
 });
 
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' });

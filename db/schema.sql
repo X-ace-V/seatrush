@@ -13,11 +13,11 @@ CREATE TABLE IF NOT EXISTS seats (
 );
 CREATE INDEX IF NOT EXISTS seats_event_idx ON seats (event_id);
 
--- Deliberately NO unique constraint on seat_id yet.
--- Stage 0 first proves the app logic alone can double-sell, then fixes it.
+-- UNIQUE(seat_id) is the last line of defense: even buggy app code
+-- cannot sell a seat twice, the database rejects it.
 CREATE TABLE IF NOT EXISTS bookings (
   id          bigserial PRIMARY KEY,
-  seat_id     int  NOT NULL REFERENCES seats(id),
+  seat_id     int  NOT NULL UNIQUE REFERENCES seats(id),
   user_id     text NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now()
 );

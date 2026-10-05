@@ -30,7 +30,9 @@ const max = Number(process.env.PG_POOL_SIZE ?? 10);
 // every client gets a listener too. The in-flight query just rejects, and the
 // pool replaces the dead connection on demand.
 function newPool(connectionString: string) {
-  const pool = new pg.Pool({ connectionString, max });
+  // Every network call needs a deadline: across a cut link, a query without
+  // one hangs forever and holds its pooled connection the whole time.
+  const pool = new pg.Pool({ connectionString, max, connectionTimeoutMillis: 3000, query_timeout: 5000 });
   const log = (err: Error) => console.error('db connection lost:', err.message);
   pool.on('error', log);
   pool.on('connect', (client) => client.on('error', log));

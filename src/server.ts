@@ -85,17 +85,44 @@ app.get<{ Params: { id: string; section: string } }>('/events/:id/sections/:sect
 const regionApis: Record<string, string> = JSON.parse(process.env.REGION_APIS ?? '{}');
 const forwardWrites = process.env.FORWARD_WRITES !== 'off';
 
+// Circuit breaker per remote region. Without one, a cut link left every
+// forwarded request hanging: thousands piled up, ate the region's CPU and
+// memory, and even local requests saw 20s stalls. Now a forward gives up
+// after 2s, and after any failure the region is treated as down for 5s:
+// requests for its events get an instant 503 instead of each waiting 2s.
+// Then one request is let through to probe whether the link is back.
+const FORWARD_TIMEOUT_MS = 2000, OPEN_MS = 5000;
+// openUntil 0 = closed (healthy). While open, fail fast. Once it expires,
+// exactly one request (the probe) goes through; success closes it.
+const breakers: Record<string, { openUntil: number; probing: boolean }> = {};
+
 async function forwarded(req: FastifyRequest, reply: FastifyReply, eventId: number, seatNo: number) {
   const home = route(eventId, seatNo).region;
   if (!forwardWrites || home === REGION || req.headers['x-forwarded-region']) return false;
+  const breaker = (breakers[home] ??= { openUntil: 0, probing: false });
+  if (breaker.openUntil && (Date.now() < breaker.openUntil || breaker.probing)) {
+    reply.code(503).header('retry-after', '5').send({ error: `region ${home} unreachable, retry` });
+    return true;
+  }
+  if (breaker.openUntil) breaker.probing = true;
   const headers: Record<string, string> = { 'content-type': 'application/json', 'x-forwarded-region': REGION };
   for (const h of ['idempotency-key', 'x-queue-pass']) if (req.headers[h]) headers[h] = req.headers[h] as string;
-  const res = await fetch(regionApis[home] + req.url, {
-    method: req.method, headers, body: req.method === 'POST' ? JSON.stringify(req.body) : undefined,
-  });
+  let res: Response, body: string;
+  try {
+    res = await fetch(regionApis[home] + req.url, {
+      method: req.method, headers, body: req.method === 'POST' ? JSON.stringify(req.body) : undefined,
+      signal: AbortSignal.timeout(FORWARD_TIMEOUT_MS),
+    });
+    body = await res.text(); // a stalled body must trip the breaker too
+    Object.assign(breaker, { openUntil: 0, probing: false });
+  } catch {
+    Object.assign(breaker, { openUntil: Date.now() + OPEN_MS, probing: false });
+    reply.code(503).header('retry-after', '5').send({ error: `region ${home} unreachable, retry` });
+    return true;
+  }
   reply.code(res.status).header('x-home-region', home).type('application/json');
   if (res.headers.get('retry-after')) reply.header('retry-after', res.headers.get('retry-after')!);
-  reply.send(await res.text());
+  reply.send(body);
   return true;
 }
 

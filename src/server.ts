@@ -1,10 +1,12 @@
 import Fastify from 'fastify';
 import { pool, replica } from './db.ts';
 import { cached } from './cache.ts';
+import { waitingRoom, waitingRoomOn, hasPass } from './waiting-room.ts';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 
 app.get('/health', async () => ({ ok: true }));
+waitingRoom(app);
 
 // Seat maps read from the replica so browse traffic cannot slow down bookings
 // on the primary. READS_FROM=primary switches back, for comparison runs.
@@ -51,6 +53,10 @@ const maxDbQueue = Number(process.env.MAX_DB_QUEUE ?? Infinity);
 // held_until < now()), so no background job is needed to free them.
 app.post<{ Body: { seatId: number; userId: string } }>('/holds', async (req, reply) => {
   const { seatId, userId } = req.body;
+
+  if (waitingRoomOn && !hasPass(req.headers['x-queue-pass'] as string, userId)) {
+    return reply.code(403).send({ error: 'join the waiting room first' });
+  }
 
   // Load shedding: if this process already has MAX_DB_QUEUE requests waiting
   // for a DB connection, a new one would only wait longer and push everyone's

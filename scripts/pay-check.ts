@@ -19,13 +19,15 @@ async function user(i: number) {
   }).then((r) => r.status).catch(() => 'network error');
   for (const status of await Promise.all([pay(), pay(), pay()])) count(`pay ${status}`);
 
-  for (let t = 0; t < 60; t++) {
-    const res = await fetch(`${BASE}/payments/${key}`);
-    const { status } = res.ok ? await res.json() : { status: `http ${res.status}` };
+  // Poll for up to 60s. 5xx and network errors are transient (a replica may
+  // be restarting during a chaos run), so keep polling through them.
+  for (let t = 0; t < 120; t++) {
+    const res = await fetch(`${BASE}/payments/${key}`).catch(() => null);
+    const status = res?.ok ? (await res.json()).status : 'pending';
     if (status !== 'pending') return count(`final ${status}`);
     await sleep(500);
   }
-  count('final still pending after 30s');
+  count('final still pending after 60s');
 }
 
 // 50 users at a time

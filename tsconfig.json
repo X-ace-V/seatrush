@@ -1,7 +1,7 @@
 {
   // Node runs .ts files directly (type stripping), so tsc only type-checks.
   "compilerOptions": {
-    "target": "es2023",
+    "target": "es2024",
     "module": "nodenext",
     "strict": true,
     "noEmit": true,

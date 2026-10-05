@@ -43,7 +43,6 @@ services:
       REDIS_URL: redis://redis:6379
       CACHE_TTL_MS: ${CACHE_TTL_MS:-1000}
       HOLD_SECONDS: ${HOLD_SECONDS:-300}
-      KAFKA_BROKERS: kafka:9092
       MAX_DB_QUEUE: ${MAX_DB_QUEUE:-10}
       WAITING_ROOM: ${WAITING_ROOM:-off}
       ADMIT_PER_SEC: ${ADMIT_PER_SEC:-2000}
@@ -52,7 +51,6 @@ services:
       pgbouncer: { condition: service_started }
       pgbouncer-replica: { condition: service_started }
       redis: { condition: service_started }
-      kafka: { condition: service_healthy }
     # Ready means serving HTTP, not just "process started". `up --wait` blocks on this.
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
@@ -103,6 +101,17 @@ services:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
       interval: 5s
       retries: 20
+
+  # Publishes outbox rows to Kafka. The API itself never talks to Kafka.
+  outbox-relay:
+    build: .
+    command: ["node", "src/outbox-relay.ts"]
+    environment:
+      DATABASE_URL: postgres://seatrush:seatrush@pgbouncer:5432/seatrush
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      kafka: { condition: service_healthy }
+      pgbouncer: { condition: service_started }
 
   # Consumes payment requests from Kafka and charges the (simulated) provider.
   payment-worker:

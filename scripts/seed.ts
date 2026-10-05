@@ -7,7 +7,7 @@ import { pool } from '../src/db.ts';
 
 const [events = 1, rows = 40, cols = 25] = process.argv.slice(2).map(Number);
 
-await pool.query('DROP TABLE IF EXISTS provider_charges, payments, bookings, seats, events');
+await pool.query('DROP TABLE IF EXISTS outbox, provider_charges, payments, bookings, seats, events');
 await pool.query(readFileSync(new URL('../db/schema.sql', import.meta.url), 'utf8'));
 
 // generate_series builds everything in two round trips.

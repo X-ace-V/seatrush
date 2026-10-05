@@ -43,3 +43,13 @@ CREATE TABLE IF NOT EXISTS provider_charges (
   approved         boolean NOT NULL,
   created_at       timestamptz NOT NULL DEFAULT now()
 );
+
+-- Transactional outbox. The API inserts the Kafka message here in the SAME
+-- transaction as the payment, so a committed payment always has its message.
+-- The outbox relay publishes rows to Kafka and deletes them.
+CREATE TABLE IF NOT EXISTS outbox (
+  id       bigserial PRIMARY KEY,
+  topic    text  NOT NULL,
+  key      text  NOT NULL,
+  payload  jsonb NOT NULL
+);

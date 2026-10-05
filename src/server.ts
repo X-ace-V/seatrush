@@ -2,8 +2,7 @@ import Fastify from 'fastify';
 import { pool, replica } from './db.ts';
 import { cached, redis } from './cache.ts';
 import { waitingRoom, waitingRoomOn, hasPass } from './waiting-room.ts';
-import { Partitioners } from 'kafkajs';
-import { kafka, ensureTopics, PAYMENT_REQUESTS } from './kafka.ts';
+import { PAYMENT_REQUESTS } from './kafka.ts';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 
@@ -91,10 +90,6 @@ app.post<{ Body: { seatId: number; userId: string } }>('/holds', async (req, rep
 // provider in the background, and GET /payments/:key reports the outcome.
 // Idempotency-Key is required: a client that times out and retries gets the
 // same payment back instead of starting a second one.
-await ensureTopics();
-const producer = kafka.producer({ createPartitioner: Partitioners.DefaultPartitioner });
-await producer.connect();
-
 app.post<{ Body: { seatId: number; userId: string } }>('/payments', async (req, reply) => {
   const key = req.headers['idempotency-key'] as string | undefined;
   if (!key) return reply.code(400).send({ error: 'Idempotency-Key header required' });
@@ -126,6 +121,12 @@ app.post<{ Body: { seatId: number; userId: string } }>('/payments', async (req, 
       await client.query('ROLLBACK');
       return reply.code(409).send({ error: 'no active hold on this seat' });
     }
+    // Outbox: the Kafka message commits atomically with the payment. Either
+    // both exist or neither does; the relay publishes it (src/outbox-relay.ts).
+    await client.query(
+      'INSERT INTO outbox (topic, key, payload) VALUES ($1, $2, $3)',
+      [PAYMENT_REQUESTS, String(seatId), { key, seatId, userId }],
+    );
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -133,13 +134,6 @@ app.post<{ Body: { seatId: number; userId: string } }>('/payments', async (req, 
   } finally {
     client.release();
   }
-
-  // NAIVE dual write: the payment is committed, now tell Kafka. If this send
-  // fails or the process dies here, the payment stays 'pending' forever.
-  await producer.send({
-    topic: PAYMENT_REQUESTS,
-    messages: [{ key: String(seatId), value: JSON.stringify({ key, seatId, userId }) }],
-  });
   return reply.code(202).send({ status: 'pending' });
 });
 

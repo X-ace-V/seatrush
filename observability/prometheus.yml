@@ -13,7 +13,9 @@ scrape_configs:
     static_configs: [{ targets: ['outbox-relay:9100'] }]
   - job_name: postgres
     static_configs:
-      - { targets: ['pg-exporter:9187'], labels: { db: primary } }
-      - { targets: ['pg-exporter-replica:9187'], labels: { db: replica } }
+      - { targets: ['pg-exporter:9187'], labels: { db: shard0 } }
+      - { targets: ['pg-exporter-replica:9187'], labels: { db: shard0-replica } }
+      - { targets: ['pg-exporter-shard1:9187'], labels: { db: shard1 } }
+      - { targets: ['pg-exporter-shard2:9187'], labels: { db: shard2 } }
   - job_name: kafka
     static_configs: [{ targets: ['kafka-exporter:9308'] }]

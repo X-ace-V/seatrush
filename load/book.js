@@ -4,7 +4,8 @@
 import http from 'k6/http';
 import { check } from 'k6';
 
-const BASE = __ENV.BASE_URL || 'http://host.docker.internal:3000';
+// Default targets nginx on the compose network, skipping Docker Desktop's host port proxy.
+const BASE = __ENV.BASE_URL || 'http://nginx';
 const SEATS = Number(__ENV.SEATS || 1000);
 
 export const options = {

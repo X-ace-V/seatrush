@@ -4,13 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Flash-sale ticket booking system, scaled stage by stage",
-  "engines": { "node": ">=22.18" },
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "start": "node src/server.ts",
     "typecheck": "tsc",
     "seed": "node scripts/seed.ts",
     "check": "node scripts/check.ts",
-    "load": "docker run --rm -i -e VUS -e DURATION -e SEATS grafana/k6 run - < load/book.js"
+    "load": "docker run --rm -i --network seatrush_default -e VUS -e DURATION -e SEATS grafana/k6 run - < load/book.js",
+    "sweep": "node scripts/sweep.ts"
   },
   "dependencies": {
     "fastify": "^5.12.5",

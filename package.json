@@ -9,7 +9,8 @@
     "start": "node src/server.ts",
     "typecheck": "tsc",
     "seed": "node scripts/seed.ts",
-    "check": "node scripts/check.ts"
+    "check": "node scripts/check.ts",
+    "load": "docker run --rm -i -e VUS -e DURATION -e SEATS grafana/k6 run - < load/book.js"
   },
   "dependencies": {
     "fastify": "^5.12.5",

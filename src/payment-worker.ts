@@ -5,7 +5,7 @@
 //  - the provider charge is keyed by the idempotency key (charged once)
 //  - the outcome is applied only while the payment is still 'pending'
 import { createHash } from 'node:crypto';
-import { catalog, route, startPartitionMapRefresh } from './shards.ts';
+import { catalog, route, startPartitionMapRefresh, isTransient } from './shards.ts';
 import { kafka, ensureTopics, PAYMENT_REQUESTS } from './kafka.ts';
 import { prom, serveMetrics } from './metrics.ts';
 
@@ -30,10 +30,25 @@ async function charge(key: string): Promise<boolean> {
   return rows[0].approved;
 }
 
-async function handle(msg: { key: string; eventId: number; seatNo: number; userId: string }) {
+type Msg = { key: string; eventId: number; seatNo: number; userId: string };
+
+async function handle(msg: Msg) {
   const stopTimer = providerSeconds.startTimer();
   const approved = await charge(msg.key);
   stopTimer();
+  // Transient errors (the partition is mid-move, a shard restarting) are
+  // retried right here until they clear, so the batch does not fail.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await applyOutcome(msg, approved);
+    } catch (err) {
+      if (!isTransient((err as { code?: string }).code) || attempt === 120) throw err;
+      await sleep(500);
+    }
+  }
+}
+
+async function applyOutcome(msg: Msg, approved: boolean) {
   const { primary, part } = route(msg.eventId, msg.seatNo);
   const client = await primary.connect();
   try {
@@ -55,8 +70,8 @@ async function handle(msg: { key: string; eventId: number; seatNo: number; userI
     // 'duplicate' = redelivered message whose outcome was already applied.
     processed.inc({ outcome: !rowCount ? 'duplicate' : approved ? 'captured' : 'declined' });
   } catch (err) {
-    await client.query('ROLLBACK');
-    throw err; // the batch is redelivered; handle() is safe to repeat
+    await client.query('ROLLBACK').catch(() => {}); // the connection may be the thing that failed
+    throw err;
   } finally {
     client.release();
   }
@@ -83,7 +98,16 @@ await consumer.subscribe({ topic: PAYMENT_REQUESTS, fromBeginning: true });
 // Offsets are committed only after the whole batch succeeds.
 await consumer.run({
   eachBatch: async ({ batch }) => {
-    await Promise.all(batch.messages.map((m) => handle(JSON.parse(m.value!.toString()))));
+    try {
+      await Promise.all(batch.messages.map((m) => handle(JSON.parse(m.value!.toString()))));
+    } catch (err) {
+      // Never let a failed batch be skipped. kafkajs went on to commit offsets
+      // of later batches past a failed one, silently dropping 25 payments.
+      // Exiting means nothing after this batch is committed; Docker restarts
+      // the worker and Kafka redelivers the batch (handle() is idempotent).
+      console.error('payment batch failed, exiting so it is redelivered:', err);
+      process.exit(1);
+    }
   },
 });
 console.log('payment worker running');

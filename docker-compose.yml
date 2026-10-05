@@ -147,6 +147,7 @@ services:
   payment-worker:
     build: .
     command: ["node", "src/payment-worker.ts"]
+    restart: unless-stopped   # it exits on a failed batch so Kafka redelivers it
     environment:
       SHARDS: *shards
       PARTITION_BY: ${PARTITION_BY:-section}

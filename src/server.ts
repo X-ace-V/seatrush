@@ -43,6 +43,7 @@ app.get<{ Params: { id: string } }>('/events/:id/seats', async (req, reply) => {
 });
 
 const holdSeconds = Number(process.env.HOLD_SECONDS ?? 300);
+const maxDbQueue = Number(process.env.MAX_DB_QUEUE ?? Infinity);
 
 // Hold a seat while the user pays. One atomic UPDATE, same idea as stage 0:
 // the row lock lets exactly one concurrent request win.
@@ -50,6 +51,13 @@ const holdSeconds = Number(process.env.HOLD_SECONDS ?? 300);
 // held_until < now()), so no background job is needed to free them.
 app.post<{ Body: { seatId: number; userId: string } }>('/holds', async (req, reply) => {
   const { seatId, userId } = req.body;
+
+  // Load shedding: if this process already has MAX_DB_QUEUE requests waiting
+  // for a DB connection, a new one would only wait longer and push everyone's
+  // latency up. Reject it now, cheaply, and tell the client when to retry.
+  if (pool.waitingCount >= maxDbQueue) {
+    return reply.code(503).header('retry-after', '1').send({ error: 'busy, retry shortly' });
+  }
 
   const { rows } = await pool.query(
     `UPDATE seats SET status = 'held', held_by = $2, held_until = now() + make_interval(secs => $3)

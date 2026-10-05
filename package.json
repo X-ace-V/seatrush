@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node src/server.ts",
     "typecheck": "tsc",
-    "seed": "node scripts/seed.ts"
+    "seed": "node scripts/seed.ts",
+    "check": "node scripts/check.ts"
   },
   "dependencies": {
     "fastify": "^5.12.5",

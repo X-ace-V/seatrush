@@ -2,7 +2,7 @@
 // N app replicas and prints one row per level, so you can watch latency
 // degrade as load grows. Reseeds before each level so seats never run out.
 //
-// Usage: [SCRIPT=browse.js] node scripts/sweep.ts <replicas> [vu levels, comma separated]
+// Usage: [SCRIPT=browse.js] [HOT_SEATS=50000 EVENTS=1 SEATS=50000] node scripts/sweep.ts <replicas> [vu levels]
 //   node scripts/sweep.ts 1
 //   node scripts/sweep.ts 4 100,400,1600
 import { execSync } from 'node:child_process';
@@ -40,11 +40,12 @@ async function waitUntilServing() {
 }
 
 for (const vus of levels) {
-  sh('node scripts/seed.ts 1000 1000'); // 1000 events x 1000 seats = 1M, collisions are rare
+  // 1000 events x 1000 seats = 1M, collisions are rare. HOT_SEATS makes event 1 a stadium.
+  sh(`node scripts/seed.ts 1000 1000 ${process.env.HOT_SEATS ?? ''}`);
   await waitUntilServing();
   try {
     sh(`docker run --rm --network seatrush_default -v ${process.cwd()}/load:/load ` +
-      `-e VUS=${vus} -e DURATION=${duration} ` +
+      `-e VUS=${vus} -e DURATION=${duration} -e EVENTS -e SEATS ` + // EVENTS=1 SEATS=50000: all load on the stadium
       `grafana/k6 run --quiet --summary-export /load/out/summary.json /load/${script}`);
   } catch {} // k6 exits non-zero when the error threshold is crossed; we still want the row
 

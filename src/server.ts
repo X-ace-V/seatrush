@@ -1,12 +1,16 @@
 import Fastify from 'fastify';
-import { pool } from './db.ts';
+import { pool, replica } from './db.ts';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 
 app.get('/health', async () => ({ ok: true }));
 
+// Seat maps read from the replica so browse traffic cannot slow down bookings
+// on the primary. READS_FROM=primary switches back, for comparison runs.
+const reader = process.env.READS_FROM === 'primary' ? pool : replica;
+
 app.get<{ Params: { id: string } }>('/events/:id/seats', async (req) => {
-  const { rows } = await pool.query(
+  const { rows } = await reader.query(
     'SELECT id, label, status FROM seats WHERE event_id = $1 ORDER BY id',
     [req.params.id],
   );

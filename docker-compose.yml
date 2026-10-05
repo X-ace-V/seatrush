@@ -39,6 +39,7 @@ services:
       DATABASE_URL: postgres://seatrush:seatrush@pgbouncer:5432/seatrush
       REPLICA_URL: postgres://seatrush:seatrush@pgbouncer-replica:5432/seatrush
       PG_POOL_SIZE: ${PG_POOL_SIZE:-10}
+      READS_FROM: ${READS_FROM:-replica}
       LOG_LEVEL: warn
     depends_on: [pgbouncer, pgbouncer-replica]
 

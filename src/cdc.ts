@@ -4,8 +4,8 @@
 // path is untouched: no dual writes, nothing extra in the transaction.
 //
 // At least once: a WAL position is acknowledged only after every Redis has
-// the change, so a crash replays changes instead of losing them. Set adds and
-// removes are idempotent, so replays are harmless.
+// the changes up to it, so a crash replays changes instead of losing them.
+// Set adds and removes are idempotent, so replays are harmless.
 import pg from 'pg';
 import { Redis } from 'ioredis';
 import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
@@ -33,27 +33,49 @@ async function follow(url: string, shard: number) {
         { connectionString: url },
         { acknowledge: { auto: false, timeoutSeconds: 0 }, flowControl: { enabled: true } }, // handle one change at a time
       );
+      // Changes are buffered and written as one Redis pipeline per region
+      // every 50ms (or at 1000 pending): one round trip per batch. Applying
+      // them one at a time cost a cross-region round trip each, about 12
+      // changes/s: a 3000-booking burst took 246s to reach the read model.
+      type Op = { add: boolean; key: string; seat: number };
+      let pending: Op[] = [], commitLsn: string | null = null, flushing = Promise.resolve();
+      const flush = () => (flushing = flushing.then(async () => {
+        if (!pending.length && !commitLsn) return;
+        const ops = pending, lsn = commitLsn;
+        pending = []; commitLsn = null;
+        await Promise.all(sinks.map((r) => {
+          const p = r.pipeline();
+          for (const o of ops) (o.add ? p.sadd(o.key, o.seat) : p.srem(o.key, o.seat));
+          return p.exec();
+        }));
+        // Ack the last commit in this batch only once every region has it.
+        if (lsn) await service.acknowledge(lsn);
+        for (const o of ops) applied.inc({ shard, op: o.add ? 'insert' : 'delete' });
+      }));
+      const timer = setInterval(() => flush().catch(() => {}), 50);
+
       service.on('data', async (lsn: string, msg: any) => {
         if (msg.relation?.name === 'bookings' && (msg.tag === 'insert' || msg.tag === 'delete')) {
           const row = msg.tag === 'insert' ? msg.new : msg.key;
-          const key = `sold:${row.event_id}`;
-          await Promise.all(sinks.map((r) => (msg.tag === 'insert' ? r.sadd(key, row.seat_no) : r.srem(key, row.seat_no))));
-          applied.inc({ shard, op: msg.tag });
+          pending.push({ add: msg.tag === 'insert', key: `sold:${row.event_id}`, seat: row.seat_no });
         }
-        if (msg.tag === 'commit') await service.acknowledge(lsn);
+        if (msg.tag === 'commit') commitLsn = lsn;
+        if (pending.length >= 1000) await flush(); // backpressure: stop reading until Redis catches up
       });
       // Also confirm keepalive positions. A slot pins ALL WAL, not just the
       // published table, and pgoutput skips transactions that do not touch
       // bookings, so under hold-only traffic no commit ever arrived to ack:
-      // the slot held 25MB and kept growing with a healthy consumer. Flow
-      // control means every earlier change is already applied when this runs.
+      // the slot held 25MB and kept growing with a healthy consumer. Only when
+      // nothing is buffered, so we never confirm a change Redis does not have.
       service.on('heartbeat', async (lsn: string, _ts: number, shouldRespond: boolean) => {
-        if (shouldRespond) await service.acknowledge(lsn);
+        if (!shouldRespond) return;
+        await flush();
+        if (!pending.length) await service.acknowledge(lsn);
       });
       await new Promise((_, reject) => {
         service.on('error', reject);
         service.subscribe(new PgoutputPlugin({ protoVersion: 1, publicationNames: [SLOT] }), SLOT).catch(reject);
-      });
+      }).finally(() => clearInterval(timer));
     } catch (err) {
       console.error(`cdc shard${shard}: ${(err as Error).message}, reconnecting`);
       await sleep(2000);

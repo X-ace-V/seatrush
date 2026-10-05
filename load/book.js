@@ -10,6 +10,7 @@ const shed = new Counter('shed'); // 503: load shedding turned the request away
 // Default targets nginx on the compose network, skipping Docker Desktop's host port proxy.
 const BASE = __ENV.BASE_URL || 'http://nginx';
 const EVENTS = Number(__ENV.EVENTS || 1000);
+const EVENT_IDS = __ENV.EVENT_IDS ? __ENV.EVENT_IDS.split(',').map(Number) : null; // e.g. only one region's events
 const SEATS = Number(__ENV.SEATS || 1000); // per event
 
 export const options = {
@@ -23,7 +24,7 @@ export const options = {
 http.setResponseCallback(http.expectedStatuses(201, 409, 503));
 
 export default function () {
-  const eventId = 1 + Math.floor(Math.random() * EVENTS);
+  const eventId = EVENT_IDS ? EVENT_IDS[Math.floor(Math.random() * EVENT_IDS.length)] : 1 + Math.floor(Math.random() * EVENTS);
   const seatNo = 1 + Math.floor(Math.random() * SEATS);
   const res = http.post(
     `${BASE}/holds`,

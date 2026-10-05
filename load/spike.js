@@ -7,6 +7,7 @@ import { Counter } from 'k6/metrics';
 
 const BASE = __ENV.BASE_URL || 'http://nginx';
 const EVENTS = Number(__ENV.EVENTS || 1000);
+const EVENT_IDS = __ENV.EVENT_IDS ? __ENV.EVENT_IDS.split(',').map(Number) : null; // e.g. only one region's events
 const SEATS = Number(__ENV.SEATS || 1000); // per event
 const RATE = Number(__ENV.RATE || 20000);
 
@@ -37,7 +38,7 @@ export default function () {
   const res = http.post(
     `${BASE}/holds`,
     JSON.stringify({
-      eventId: 1 + Math.floor(Math.random() * EVENTS), seatNo: 1 + Math.floor(Math.random() * SEATS), userId: `u${__VU}-${__ITER}`,
+      eventId: EVENT_IDS ? EVENT_IDS[Math.floor(Math.random() * EVENT_IDS.length)] : 1 + Math.floor(Math.random() * EVENTS), seatNo: 1 + Math.floor(Math.random() * SEATS), userId: `u${__VU}-${__ITER}`,
     }),
     { headers: { 'Content-Type': 'application/json' }, timeout: '10s' },
   );

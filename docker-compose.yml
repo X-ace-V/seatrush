@@ -1,3 +1,11 @@
+# Shard list used by every process: shard 0 is the original primary + replica
+# (behind PgBouncer) and also holds the catalog; shards 1 and 2 are extra
+# primaries. Containers reach them by service name.
+x-shards: &shards >-
+  [{"primary":"postgres://seatrush:seatrush@pgbouncer:5432/seatrush","replica":"postgres://seatrush:seatrush@pgbouncer-replica:5432/seatrush"},
+   {"primary":"postgres://seatrush:seatrush@shard1:5432/seatrush"},
+   {"primary":"postgres://seatrush:seatrush@shard2:5432/seatrush"}]
+
 services:
   postgres:
     image: postgres:16
@@ -36,8 +44,8 @@ services:
   app:
     build: .
     environment:
-      DATABASE_URL: postgres://seatrush:seatrush@pgbouncer:5432/seatrush
-      REPLICA_URL: postgres://seatrush:seatrush@pgbouncer-replica:5432/seatrush
+      SHARDS: *shards
+      PARTITION_BY: ${PARTITION_BY:-section}
       PG_POOL_SIZE: ${PG_POOL_SIZE:-10}
       READS_FROM: ${READS_FROM:-replica}
       REDIS_URL: redis://redis:6379
@@ -50,6 +58,8 @@ services:
     depends_on:
       pgbouncer: { condition: service_started }
       pgbouncer-replica: { condition: service_started }
+      shard1: { condition: service_healthy }
+      shard2: { condition: service_healthy }
       redis: { condition: service_started }
     # Ready means serving HTTP, not just "process started". `up --wait` blocks on this.
     healthcheck:
@@ -71,6 +81,21 @@ services:
       DEFAULT_POOL_SIZE: ${PGB_POOL_SIZE:-40}
     depends_on:
       postgres: { condition: service_healthy }
+
+  # Extra shards: plain primaries. 4 app replicas x PG_POOL_SIZE 10 = 40
+  # connections each, under the default limit of 100, so no PgBouncer here.
+  shard1: &shard
+    image: postgres:16
+    environment:
+      POSTGRES_USER: seatrush
+      POSTGRES_PASSWORD: seatrush
+      POSTGRES_DB: seatrush
+    ports: ["5441:5432"]
+    healthcheck: *pg-health
+
+  shard2:
+    <<: *shard
+    ports: ["5442:5432"]
 
   # Same pooler, pointed at the replica, for read traffic.
   pgbouncer-replica:
@@ -107,7 +132,8 @@ services:
     build: .
     command: ["node", "src/outbox-relay.ts"]
     environment:
-      DATABASE_URL: postgres://seatrush:seatrush@pgbouncer:5432/seatrush
+      SHARDS: *shards
+      PARTITION_BY: ${PARTITION_BY:-section}
       KAFKA_BROKERS: kafka:9092
     depends_on:
       kafka: { condition: service_healthy }
@@ -118,7 +144,8 @@ services:
     build: .
     command: ["node", "src/payment-worker.ts"]
     environment:
-      DATABASE_URL: postgres://seatrush:seatrush@pgbouncer:5432/seatrush
+      SHARDS: *shards
+      PARTITION_BY: ${PARTITION_BY:-section}
       KAFKA_BROKERS: kafka:9092
     depends_on:
       kafka: { condition: service_healthy }

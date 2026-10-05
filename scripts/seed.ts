@@ -1,27 +1,46 @@
-// Resets the DB and creates EVENTS events with SEATS seats each. Event 1 can
-// be made bigger (a stadium) with HOT_SEATS. Seats come in 1000-seat sections.
-// Usage: node scripts/seed.ts [events] [seats] [hotSeats]
+// Resets the catalog and every shard, then creates EVENTS events with SEATS
+// seats each (event 1 gets HOT_SEATS, e.g. a stadium). Partition p starts on
+// shard p % SHARDS_USED (default: all configured shards).
+// Usage: [SHARDS_USED=n] node scripts/seed.ts [events] [seats] [hotSeats]
 //   default: 1 event x 1000 seats
 //   sweeps:  1000 events x 1000 seats = 1M
 import { readFileSync } from 'node:fs';
-import { pool } from '../src/db.ts';
+import { shards, catalog, partitionOf, PARTITIONS, SECTION_SIZE, endAll } from '../src/shards.ts';
 
 const [events = 1, seats = 1000, hotSeats = seats] = process.argv.slice(2).map(Number);
+const used = Number(process.env.SHARDS_USED ?? shards.length);
+const sql = (file: string) => readFileSync(new URL(`../db/${file}`, import.meta.url), 'utf8');
 
-await pool.query('DROP TABLE IF EXISTS outbox, provider_charges, payments, bookings, seats, events');
-await pool.query(readFileSync(new URL('../db/schema.sql', import.meta.url), 'utf8'));
+await catalog.query('DROP TABLE IF EXISTS events, partitions, provider_charges');
+await catalog.query(sql('catalog.sql'));
+await Promise.all(shards.map(async (s) => {
+  await s.primary.query('DROP TABLE IF EXISTS outbox, payments, bookings, seats');
+  await s.primary.query(sql('schema.sql'));
+}));
 
-// generate_series builds everything in two round trips.
-await pool.query(
+await catalog.query('INSERT INTO partitions SELECT p, p % $2 FROM generate_series(0, $1 - 1) p', [PARTITIONS, used]);
+await catalog.query(
   `INSERT INTO events (name, seat_count)
    SELECT 'Event ' || n, CASE WHEN n = 1 THEN $2::int ELSE $3::int END FROM generate_series(1, $1) n`,
   [events, hotSeats, seats],
 );
-await pool.query(
-  `INSERT INTO seats (event_id, seat_no, label)
-   SELECT e.id, n, 'S' || (n - 1) / 1000 || '-' || (n - 1) % 1000 + 1
-   FROM events e, generate_series(1, e.seat_count) n`,
-);
 
-console.log(`seeded ${events} event(s), ${seats} seats each, event 1 has ${hotSeats}`);
-await pool.end();
+// Each (event, section) goes to its partition's shard: one INSERT per shard.
+const batches = shards.map(() => ({ event: [] as number[], from: [] as number[], to: [] as number[], part: [] as number[] }));
+for (let e = 1; e <= events; e++) {
+  const count = e === 1 ? hotSeats : seats;
+  for (let s = 0; s * SECTION_SIZE < count; s++) {
+    const part = partitionOf(e, s), b = batches[part % used];
+    b.event.push(e); b.from.push(s * SECTION_SIZE + 1); b.to.push(Math.min((s + 1) * SECTION_SIZE, count)); b.part.push(part);
+  }
+}
+await Promise.all(batches.map((b, i) => b.event.length && shards[i].primary.query(
+  `INSERT INTO seats (event_id, seat_no, part, label)
+   SELECT u.event, n, u.part, 'S' || (n - 1) / 1000 || '-' || (n - 1) % 1000 + 1
+   FROM unnest($1::int[], $2::int[], $3::int[], $4::int[]) AS u(event, f, t, part), generate_series(u.f, u.t) n`,
+  [b.event, b.from, b.to, b.part],
+)));
+
+console.log(`seeded ${events} event(s), ${seats} seats each, event 1 has ${hotSeats}; ${PARTITIONS} partitions on ${used} shard(s): ` +
+  batches.map((b, i) => `shard${i}=${b.event.length} sections`).join(' '));
+await endAll();

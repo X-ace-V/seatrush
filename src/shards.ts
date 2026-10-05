@@ -20,7 +20,14 @@ const config: { primary: string; replica?: string }[] = JSON.parse(process.env.S
   { primary: `${local}:5442/seatrush` },
 ]));
 const max = Number(process.env.PG_POOL_SIZE ?? 10);
-const newPool = (connectionString: string) => new pg.Pool({ connectionString, max });
+// Without an 'error' listener, an idle pooled connection killed by a database
+// restart emits an unhandled error and crashes the whole process. Log it; the
+// pool drops the dead connection and opens a new one on demand.
+function newPool(connectionString: string) {
+  const pool = new pg.Pool({ connectionString, max });
+  pool.on('error', (err) => console.error('idle db connection lost:', err.message));
+  return pool;
+}
 
 export const shards: Shard[] = config.map((c) => ({ primary: newPool(c.primary), replica: c.replica ? newPool(c.replica) : undefined }));
 export const catalog = shards[0].primary;

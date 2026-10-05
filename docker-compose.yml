@@ -135,5 +135,33 @@ services:
     ports: ["8080:80"]
     depends_on: [app]
 
+  # ---- observability ----
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+    volumes: [./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports: ["9090:9090"]
+
+  # Commits/s, connections, replication lag. One exporter per database.
+  pg-exporter: &pg-exporter
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    environment:
+      DATA_SOURCE_NAME: postgresql://seatrush:seatrush@postgres:5432/seatrush?sslmode=disable
+    depends_on: [postgres]
+
+  pg-exporter-replica:
+    <<: *pg-exporter
+    environment:
+      DATA_SOURCE_NAME: postgresql://seatrush:seatrush@postgres-replica:5432/seatrush?sslmode=disable
+    depends_on: [postgres-replica]
+
+  # Consumer group lag: how far the payment worker is behind.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    command: ["--kafka.server=kafka:9092"]
+    restart: on-failure   # exits if Kafka is down at startup
+    depends_on:
+      kafka: { condition: service_healthy }
+
 volumes:
   pgdata:

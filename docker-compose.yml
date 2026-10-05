@@ -48,6 +48,11 @@ services:
       ADMIT_PER_SEC: ${ADMIT_PER_SEC:-2000}
       LOG_LEVEL: warn
     depends_on: [pgbouncer, pgbouncer-replica, redis]
+    # Ready means serving HTTP, not just "process started". `up --wait` blocks on this.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 2s
+      retries: 15
 
   # Connection pooler. Apps may open thousands of client connections;
   # pgbouncer multiplexes them onto DEFAULT_POOL_SIZE real Postgres connections.

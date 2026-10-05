@@ -42,6 +42,14 @@ async function follow(url: string, shard: number) {
         }
         if (msg.tag === 'commit') await service.acknowledge(lsn);
       });
+      // Also confirm keepalive positions. A slot pins ALL WAL, not just the
+      // published table, and pgoutput skips transactions that do not touch
+      // bookings, so under hold-only traffic no commit ever arrived to ack:
+      // the slot held 25MB and kept growing with a healthy consumer. Flow
+      // control means every earlier change is already applied when this runs.
+      service.on('heartbeat', async (lsn: string, _ts: number, shouldRespond: boolean) => {
+        if (shouldRespond) await service.acknowledge(lsn);
+      });
       await new Promise((_, reject) => {
         service.on('error', reject);
         service.subscribe(new PgoutputPlugin({ protoVersion: 1, publicationNames: [SLOT] }), SLOT).catch(reject);

@@ -8,7 +8,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { redis } from './cache.ts';
-import { pool } from './db.ts';
+import { catalog } from './shards.ts';
 import { prom } from './metrics.ts';
 
 const queueEvents = new prom.Counter({ name: 'queue_events_total', help: 'Waiting room joins and admissions', labelNames: ['event'] });
@@ -37,7 +37,7 @@ export function hasPass(pass: string | undefined, userId: string) {
 const sections = new Map<number, number>();
 async function sectionCount(eventId: number) {
   if (!sections.has(eventId)) {
-    const { rows } = await pool.query('SELECT ceil(seat_count / 1000.0)::int AS n FROM events WHERE id = $1', [eventId]);
+    const { rows } = await catalog.query('SELECT ceil(seat_count / 1000.0)::int AS n FROM events WHERE id = $1', [eventId]);
     sections.set(eventId, rows[0]?.n ?? Infinity);
   }
   return sections.get(eventId)!;

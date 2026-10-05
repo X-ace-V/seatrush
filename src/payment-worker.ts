@@ -5,7 +5,7 @@
 //  - the provider charge is keyed by the idempotency key (charged once)
 //  - the outcome is applied only while the payment is still 'pending'
 import { createHash } from 'node:crypto';
-import { pool } from './db.ts';
+import { catalog, route, startPartitionMapRefresh } from './shards.ts';
 import { kafka, ensureTopics, PAYMENT_REQUESTS } from './kafka.ts';
 import { prom, serveMetrics } from './metrics.ts';
 
@@ -20,7 +20,8 @@ async function charge(key: string): Promise<boolean> {
   await sleep(50 + Math.random() * 100);
   const approved = createHash('sha256').update(key).digest()[0] >= 26;
   // Same key again: the provider returns the original result instead of charging.
-  const { rows } = await pool.query(
+  // The simulated provider's ledger lives in the catalog, outside our shards.
+  const { rows } = await catalog.query(
     `INSERT INTO provider_charges (idempotency_key, approved) VALUES ($1, $2)
      ON CONFLICT (idempotency_key) DO UPDATE SET attempts = provider_charges.attempts + 1
      RETURNING approved`,
@@ -33,7 +34,8 @@ async function handle(msg: { key: string; eventId: number; seatNo: number; userI
   const stopTimer = providerSeconds.startTimer();
   const approved = await charge(msg.key);
   stopTimer();
-  const client = await pool.connect();
+  const { primary, part } = route(msg.eventId, msg.seatNo);
+  const client = await primary.connect();
   try {
     await client.query('BEGIN');
     const { rowCount } = await client.query(
@@ -42,7 +44,7 @@ async function handle(msg: { key: string; eventId: number; seatNo: number; userI
     );
     if (rowCount && approved) {
       await client.query(`UPDATE seats SET status = 'booked' WHERE event_id = $1 AND seat_no = $2 AND status = 'paying'`, [msg.eventId, msg.seatNo]);
-      await client.query('INSERT INTO bookings (event_id, seat_no, user_id) VALUES ($1, $2, $3)', [msg.eventId, msg.seatNo, msg.userId]);
+      await client.query('INSERT INTO bookings (event_id, seat_no, part, user_id) VALUES ($1, $2, $3, $4)', [msg.eventId, msg.seatNo, part, msg.userId]);
     } else if (rowCount) {
       await client.query(
         `UPDATE seats SET status = 'free', held_by = NULL, held_until = NULL WHERE event_id = $1 AND seat_no = $2 AND status = 'paying'`,
@@ -61,6 +63,7 @@ async function handle(msg: { key: string; eventId: number; seatNo: number; userI
 }
 
 serveMetrics();
+await startPartitionMapRefresh();
 await ensureTopics();
 // Recovery tuning, found on the dashboard: after a 40s Kafka outage, payments
 // stayed stalled ~34s after Kafka was back.

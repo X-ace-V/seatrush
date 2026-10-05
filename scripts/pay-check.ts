@@ -22,7 +22,7 @@ async function user(i: number) {
   // Poll for up to 60s. 5xx and network errors are transient (a replica may
   // be restarting during a chaos run), so keep polling through them.
   for (let t = 0; t < 120; t++) {
-    const res = await fetch(`${BASE}/payments/${key}`).catch(() => null);
+    const res = await fetch(`${BASE}/payments/${key}?eventId=${eventId}&seatNo=${seatNo}`).catch(() => null);
     const status = res?.ok ? (await res.json()).status : 'pending';
     if (status !== 'pending') return count(`final ${status}`);
     await sleep(500);

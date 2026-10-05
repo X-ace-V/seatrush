@@ -4,7 +4,7 @@
 // publishing but before deleting, those rows are published again on the next
 // pass, so consumers must be idempotent (the payment worker is).
 import { Partitioners } from 'kafkajs';
-import { pool } from './db.ts';
+import { shards } from './shards.ts';
 import { kafka, ensureTopics } from './kafka.ts';
 import { prom, serveMetrics } from './metrics.ts';
 
@@ -12,7 +12,10 @@ const publishedTotal = new prom.Counter({ name: 'outbox_published_total', help: 
 new prom.Gauge({
   name: 'outbox_backlog',
   help: 'Rows waiting in the outbox. Grows while Kafka is down.',
-  async collect() { this.set(Number((await pool.query('SELECT count(*) FROM outbox')).rows[0].count)); },
+  async collect() {
+    const counts = await Promise.all(shards.map((s) => s.primary.query('SELECT count(*)::int AS n FROM outbox')));
+    this.set(counts.reduce((sum, r) => sum + r.rows[0].n, 0));
+  },
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -23,7 +26,8 @@ const producer = kafka.producer({ createPartitioner: Partitioners.DefaultPartiti
 await producer.connect();
 console.log('outbox relay running');
 
-for (;;) {
+// One pass over one shard's outbox. Returns how many rows it published.
+async function publishFrom(pool: (typeof shards)[number]['primary']) {
   const client = await pool.connect();
   let published = 0;
   try {
@@ -51,5 +55,12 @@ for (;;) {
   } finally {
     client.release();
   }
+  return published;
+}
+
+// Every shard has its own outbox; drain them all, then idle briefly if empty.
+for (;;) {
+  let published = 0;
+  for (const s of shards) published += await publishFrom(s.primary).catch(() => 0); // a shard being down must not stop the others
   if (!published) await sleep(50); // idle poll interval
 }

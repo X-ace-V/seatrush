@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { pool, replica } from './db.ts';
+import { shards, route, routeSection, startPartitionMapRefresh } from './shards.ts';
 import { cached, redis } from './cache.ts';
 import { waitingRoom, waitingRoomOn, hasPass } from './waiting-room.ts';
 import { PAYMENT_REQUESTS } from './kafka.ts';
@@ -8,30 +8,36 @@ import { instrument, watchPools } from './metrics.ts';
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 
 instrument(app);
-watchPools({ primary: pool, replica });
+watchPools(Object.fromEntries(shards.flatMap((s, i) => [[`shard${i}`, s.primary], ...(s.replica ? [[`shard${i}-replica`, s.replica]] : [])])));
+await startPartitionMapRefresh();
 app.get('/health', async () => ({ ok: true }));
 waitingRoom(app);
 
-// Seat maps read from the replica so browse traffic cannot slow down bookings
-// on the primary. READS_FROM=primary switches back, for comparison runs.
-const reader = process.env.READS_FROM === 'primary' ? pool : replica;
+type Shard = ReturnType<typeof route>;
+
+// Seat maps read from the shard's replica (if it has one) so browse traffic
+// cannot slow down bookings on the primary. READS_FROM=primary switches back.
+const reader = (s: Shard) => (process.env.READS_FROM === 'primary' ? undefined : s.replica) ?? s.primary;
 
 // Read-your-writes: a client that just booked sends back the `lsn` it got
 // (x-min-lsn). If the replica has not replayed up to that point yet, read
 // from the primary instead so the user always sees their own booking.
 // This must be a separate query BEFORE the read: checking inside the same
 // query would race, because the read's snapshot is taken first.
-async function freshReader(minLsn: string) {
-  if (reader === pool) return reader;
-  const { rows } = await replica.query('SELECT pg_last_wal_replay_lsn() >= $1::pg_lsn AS fresh', [minLsn]);
-  return rows[0].fresh ? replica : pool;
+// The LSN belongs to the shard that took the hold, which is the same shard
+// that serves this seat's section.
+async function freshReader(s: Shard, minLsn: string) {
+  const r = reader(s);
+  if (r === s.primary) return r;
+  const { rows } = await r.query('SELECT pg_last_wal_replay_lsn() >= $1::pg_lsn AS fresh', [minLsn]);
+  return rows[0].fresh ? r : s.primary;
 }
 
 // Seat maps are served one 1000-seat section at a time, like real ticketing
 // sites: a 50K-seat stadium map would be megabytes of JSON.
 // An expired hold is reported as free: it is free, nobody has reclaimed it yet.
 const SECTION_SIZE = 1000;
-const seatMap = (db: typeof pool, eventId: number, section: number) =>
+const seatMap = (db: Shard['primary'], eventId: number, section: number) =>
   db.query(
     `SELECT seat_no AS "seatNo", label,
             CASE WHEN status = 'held' AND held_until < now() THEN 'free' ELSE status END AS status
@@ -45,11 +51,12 @@ const seatMap = (db: typeof pool, eventId: number, section: number) =>
 // A user holding an x-min-lsn token skips the cache to see their own booking.
 app.get<{ Params: { id: string; section: string } }>('/events/:id/sections/:section/seats', async (req, reply) => {
   const [eventId, section] = [Number(req.params.id), Number(req.params.section)];
+  const shard = routeSection(eventId, section);
   const minLsn = req.headers['x-min-lsn'] as string | undefined;
-  if (minLsn) return seatMap(await freshReader(minLsn), eventId, section);
+  if (minLsn) return seatMap(await freshReader(shard, minLsn), eventId, section);
 
   const json = await cached(`seats:${eventId}:${section}`, async () => {
-    const seats = await seatMap(reader, eventId, section);
+    const seats = await seatMap(reader(shard), eventId, section);
     // Record sold-out sections so the waiting room can tell queued users the
     // event is gone. TTL stays below the hold expiry, because expired holds free seats again.
     if (seats.length && !seats.some((s) => s.status === 'free')) {
@@ -69,6 +76,7 @@ const maxDbQueue = Number(process.env.MAX_DB_QUEUE ?? Infinity);
 // held_until < now()), so no background job is needed to free them.
 app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/holds', async (req, reply) => {
   const { eventId, seatNo, userId } = req.body;
+  const { primary } = route(eventId, seatNo);
 
   if (waitingRoomOn && !hasPass(req.headers['x-queue-pass'] as string, userId)) {
     return reply.code(403).send({ error: 'join the waiting room first' });
@@ -77,11 +85,11 @@ app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/holds'
   // Load shedding: if this process already has MAX_DB_QUEUE requests waiting
   // for a DB connection, a new one would only wait longer and push everyone's
   // latency up. Reject it now, cheaply, and tell the client when to retry.
-  if (pool.waitingCount >= maxDbQueue) {
+  if (primary.waitingCount >= maxDbQueue) {
     return reply.code(503).header('retry-after', '1').send({ error: 'busy, retry shortly' });
   }
 
-  const { rows } = await pool.query(
+  const { rows } = await primary.query(
     `UPDATE seats SET status = 'held', held_by = $2, held_until = now() + make_interval(secs => $3)
      WHERE event_id = $4 AND seat_no = $1 AND (status = 'free' OR (status = 'held' AND held_until < now()))
      RETURNING held_until`,
@@ -91,7 +99,7 @@ app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/holds'
 
   // WAL position after our commit. Any replica that has replayed this far
   // can see the hold. Clients pass it back as x-min-lsn.
-  const { rows: [{ lsn }] } = await pool.query('SELECT pg_current_wal_lsn()::text AS lsn');
+  const { rows: [{ lsn }] } = await primary.query('SELECT pg_current_wal_lsn()::text AS lsn');
   return reply.code(201).send({ eventId, seatNo, heldUntil: rows[0].held_until, lsn });
 });
 
@@ -103,15 +111,16 @@ app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/paymen
   const key = req.headers['idempotency-key'] as string | undefined;
   if (!key) return reply.code(400).send({ error: 'Idempotency-Key header required' });
   const { eventId, seatNo, userId } = req.body;
+  const { primary, part } = route(eventId, seatNo);
 
-  const client = await pool.connect();
+  const client = await primary.connect();
   try {
     await client.query('BEGIN');
     // The primary key serializes duplicates: a concurrent retry blocks here
     // until the first commits, then conflicts and returns the existing payment.
     const inserted = await client.query(
-      'INSERT INTO payments (idempotency_key, event_id, seat_no, user_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-      [key, eventId, seatNo, userId],
+      'INSERT INTO payments (idempotency_key, event_id, seat_no, part, user_id) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING',
+      [key, eventId, seatNo, part, userId],
     );
     if (!inserted.rowCount) {
       await client.query('ROLLBACK');
@@ -146,8 +155,10 @@ app.post<{ Body: { eventId: number; seatNo: number; userId: string } }>('/paymen
   return reply.code(202).send({ status: 'pending' });
 });
 
-app.get<{ Params: { key: string } }>('/payments/:key', async (req, reply) => {
-  const { rows } = await pool.query('SELECT status FROM payments WHERE idempotency_key = $1', [req.params.key]);
+// Payments live on the seat's shard, so the status lookup needs the seat too.
+app.get<{ Params: { key: string }; Querystring: { eventId: string; seatNo: string } }>('/payments/:key', async (req, reply) => {
+  const { primary } = route(Number(req.query.eventId), Number(req.query.seatNo));
+  const { rows } = await primary.query('SELECT status FROM payments WHERE idempotency_key = $1', [req.params.key]);
   return rows[0] ?? reply.code(404).send({ error: 'unknown payment' });
 });
 

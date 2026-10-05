@@ -21,9 +21,14 @@ async function freshReader(minLsn: string) {
   return rows[0].fresh ? replica : pool;
 }
 
+// An expired hold is reported as free: it is free, nobody has reclaimed it yet.
 const seatMap = (db: typeof pool, eventId: string) =>
-  db.query('SELECT id, label, status FROM seats WHERE event_id = $1 ORDER BY id', [eventId])
-    .then((r) => r.rows);
+  db.query(
+    `SELECT id, label,
+            CASE WHEN status = 'held' AND held_until < now() THEN 'free' ELSE status END AS status
+     FROM seats WHERE event_id = $1 ORDER BY id`,
+    [eventId],
+  ).then((r) => r.rows);
 
 // Browsers get a seat map up to CACHE_TTL_MS stale. That is safe because the
 // booking itself is checked atomically on the primary. We do not invalidate
@@ -37,27 +42,27 @@ app.get<{ Params: { id: string } }>('/events/:id/seats', async (req, reply) => {
   return reply.type('application/json').send(json);
 });
 
-// Claim and record the seat in ONE atomic statement.
-// The UPDATE takes a row lock. A concurrent request for the same seat waits
-// on that lock, then re-checks status = 'free', finds it false, and matches
-// zero rows. So exactly one request wins and the rest get 409.
-app.post<{ Body: { seatId: number; userId: string } }>('/bookings', async (req, reply) => {
+const holdSeconds = Number(process.env.HOLD_SECONDS ?? 300);
+
+// Hold a seat while the user pays. One atomic UPDATE, same idea as stage 0:
+// the row lock lets exactly one concurrent request win.
+// Expired holds are reclaimed lazily right here (status = 'held' AND
+// held_until < now()), so no background job is needed to free them.
+app.post<{ Body: { seatId: number; userId: string } }>('/holds', async (req, reply) => {
   const { seatId, userId } = req.body;
 
   const { rows } = await pool.query(
-    `WITH claimed AS (
-       UPDATE seats SET status = 'booked' WHERE id = $1 AND status = 'free' RETURNING id
-     )
-     INSERT INTO bookings (seat_id, user_id) SELECT id, $2 FROM claimed RETURNING id`,
-    [seatId, userId],
+    `UPDATE seats SET status = 'held', held_by = $2, held_until = now() + make_interval(secs => $3)
+     WHERE id = $1 AND (status = 'free' OR (status = 'held' AND held_until < now()))
+     RETURNING held_until`,
+    [seatId, userId, holdSeconds],
   );
-
   if (!rows[0]) return reply.code(409).send({ error: 'seat unavailable' });
 
   // WAL position after our commit. Any replica that has replayed this far
-  // can see the booking. Clients pass it back as x-min-lsn.
+  // can see the hold. Clients pass it back as x-min-lsn.
   const { rows: [{ lsn }] } = await pool.query('SELECT pg_current_wal_lsn()::text AS lsn');
-  return reply.code(201).send({ bookingId: rows[0].id, lsn });
+  return reply.code(201).send({ seatId, heldUntil: rows[0].held_until, lsn });
 });
 
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' });

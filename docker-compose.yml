@@ -42,6 +42,7 @@ services:
       READS_FROM: ${READS_FROM:-replica}
       REDIS_URL: redis://redis:6379
       CACHE_TTL_MS: ${CACHE_TTL_MS:-1000}
+      HOLD_SECONDS: ${HOLD_SECONDS:-300}
       LOG_LEVEL: warn
     depends_on: [pgbouncer, pgbouncer-replica, redis]
 

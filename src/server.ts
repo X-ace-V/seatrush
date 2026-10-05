@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { shards, route, routeSection, startPartitionMapRefresh } from './shards.ts';
+import { shards, route, routeSection, startPartitionMapRefresh, isTransient } from './shards.ts';
 import { cached, redis } from './cache.ts';
 import { waitingRoom, waitingRoomOn, hasPass } from './waiting-room.ts';
 import { PAYMENT_REQUESTS } from './kafka.ts';
@@ -12,10 +12,10 @@ watchPools(Object.fromEntries(shards.flatMap((s, i) => [[`shard${i}`, s.primary]
 await startPartitionMapRefresh();
 app.get('/health', async () => ({ ok: true }));
 
-// SR001 = the shard fenced off a partition that just moved (see db/schema.sql).
-// The router's map catches up within a second, so the client just retries.
+// Transient failures (a partition moving, a restarting shard; see isTransient)
+// get 503 + Retry-After, not 500: the router's map catches up within a second.
 app.setErrorHandler((err: Error & { code?: string }, _req, reply) => {
-  if (err.code === 'SR001') return reply.code(503).header('retry-after', '1').send({ error: 'partition moving, retry' });
+  if (isTransient(err.code)) return reply.code(503).header('retry-after', '1').send({ error: 'temporarily unavailable, retry' });
   reply.log.error(err);
   return reply.code(500).send({ error: 'internal error' });
 });

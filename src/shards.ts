@@ -49,6 +49,8 @@ export function partitionOf(eventId: number, section: number) {
 let map: number[] = [];
 export async function loadPartitionMap() {
   const { rows } = await catalog.query('SELECT id, shard FROM partitions');
+  // A reseed rebuilds the table; never swap in an empty or partial map.
+  if (rows.length !== PARTITIONS) return;
   const next: number[] = [];
   for (const r of rows) next[r.id] = r.shard;
   map = next;
@@ -63,8 +65,14 @@ export function startPartitionMapRefresh() {
 
 export function routeSection(eventId: number, section: number) {
   const part = partitionOf(eventId, section);
+  if (map[part] === undefined) throw Object.assign(new Error('partition map not loaded yet'), { code: 'SR002' });
   return { part, shard: map[part], ...shards[map[part]] };
 }
 export const route = (eventId: number, seatNo: number) => routeSection(eventId, sectionOf(seatNo));
+
+// Errors that go away on their own: a partition fenced mid-move (SR001), no
+// partition map yet (SR002), connection failures (08xxx) and server shutdowns
+// (57Pxx). Callers retry these instead of failing the work.
+export const isTransient = (code = '') => code === 'SR001' || code === 'SR002' || code.startsWith('08') || code.startsWith('57P');
 
 export const endAll = () => Promise.all(shards.flatMap((s) => [s.primary.end(), s.replica?.end()]));

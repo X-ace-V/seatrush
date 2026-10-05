@@ -7,7 +7,7 @@ import type pg from 'pg';
 
 client.collectDefaultMetrics();
 const { register } = client;
-export { client };
+export { client as prom };
 
 const httpDuration = new client.Histogram({
   name: 'http_request_duration_seconds',

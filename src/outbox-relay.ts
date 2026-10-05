@@ -6,9 +6,18 @@
 import { Partitioners } from 'kafkajs';
 import { pool } from './db.ts';
 import { kafka, ensureTopics } from './kafka.ts';
+import { prom, serveMetrics } from './metrics.ts';
+
+const publishedTotal = new prom.Counter({ name: 'outbox_published_total', help: 'Outbox rows published to Kafka' });
+new prom.Gauge({
+  name: 'outbox_backlog',
+  help: 'Rows waiting in the outbox. Grows while Kafka is down.',
+  async collect() { this.set(Number((await pool.query('SELECT count(*) FROM outbox')).rows[0].count)); },
+});
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+serveMetrics();
 await ensureTopics();
 const producer = kafka.producer({ createPartitioner: Partitioners.DefaultPartitioner });
 await producer.connect();
@@ -34,6 +43,7 @@ for (;;) {
     }
     await client.query('COMMIT');
     published = rows.length;
+    publishedTotal.inc(published);
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('relay: publish failed, retrying', (err as Error).message);

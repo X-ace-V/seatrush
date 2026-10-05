@@ -7,6 +7,10 @@
 import { createHash } from 'node:crypto';
 import { pool } from './db.ts';
 import { kafka, ensureTopics, PAYMENT_REQUESTS } from './kafka.ts';
+import { prom, serveMetrics } from './metrics.ts';
+
+const processed = new prom.Counter({ name: 'payments_processed_total', help: 'Payment messages handled', labelNames: ['outcome'] });
+const providerSeconds = new prom.Histogram({ name: 'provider_charge_seconds', help: 'Payment provider call latency', buckets: [0.05, 0.1, 0.15, 0.25, 0.5, 1] });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -26,7 +30,9 @@ async function charge(key: string): Promise<boolean> {
 }
 
 async function handle(msg: { key: string; seatId: number; userId: string }) {
+  const stopTimer = providerSeconds.startTimer();
   const approved = await charge(msg.key);
+  stopTimer();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -44,6 +50,8 @@ async function handle(msg: { key: string; seatId: number; userId: string }) {
       );
     }
     await client.query('COMMIT');
+    // 'duplicate' = redelivered message whose outcome was already applied.
+    processed.inc({ outcome: !rowCount ? 'duplicate' : approved ? 'captured' : 'declined' });
   } catch (err) {
     await client.query('ROLLBACK');
     throw err; // the batch is redelivered; handle() is safe to repeat
@@ -52,6 +60,7 @@ async function handle(msg: { key: string; seatId: number; userId: string }) {
   }
 }
 
+serveMetrics();
 await ensureTopics();
 const consumer = kafka.consumer({ groupId: 'payment-workers' });
 await consumer.connect();

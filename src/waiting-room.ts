@@ -8,9 +8,9 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { redis } from './cache.ts';
-import { client } from './metrics.ts';
+import { prom } from './metrics.ts';
 
-const queueEvents = new client.Counter({ name: 'queue_events_total', help: 'Waiting room joins and admissions', labelNames: ['event'] });
+const queueEvents = new prom.Counter({ name: 'queue_events_total', help: 'Waiting room joins and admissions', labelNames: ['event'] });
 
 export const waitingRoomOn = process.env.WAITING_ROOM === 'on';
 const admitPerSec = Number(process.env.ADMIT_PER_SEC ?? 2000);
